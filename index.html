@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#111413" />
+    <title>Treino A/B</title>
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" href="./assets/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./styles.css?v=3" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <img src="./assets/icon.svg" alt="" width="40" height="40" />
+          <div>
+            <p class="eyebrow">Diario de treino</p>
+            <h1 id="screenTitle">Treino A</h1>
+          </div>
+        </div>
+        <button class="icon-button" type="button" data-action="reset-today" aria-label="Reiniciar treino atual">
+          <span aria-hidden="true">↺</span>
+        </button>
+      </header>
+
+      <main>
+        <section class="switcher" aria-label="Selecionar treino">
+          <button class="switch-button is-active" type="button" data-workout="A">Treino A</button>
+          <button class="switch-button" type="button" data-workout="B">Treino B</button>
+        </section>
+
+        <section id="workoutView" class="view is-active" aria-label="Treino de hoje">
+          <div id="progressPanel" class="progress-panel"></div>
+          <div id="pendingPanel" class="pending-panel"></div>
+          <div id="exerciseList" class="exercise-list"></div>
+        </section>
+
+        <section id="editView" class="view" aria-label="Editar treino">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Montagem</p>
+              <h2 id="editTitle">Treino A</h2>
+            </div>
+            <button class="primary small" type="button" data-action="add-exercise">+ Exercício</button>
+          </div>
+          <div id="editList" class="edit-list"></div>
+        </section>
+
+        <section id="historyView" class="view" aria-label="Historico">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Registro</p>
+              <h2>Histórico</h2>
+            </div>
+            <button class="ghost small" type="button" data-action="export-data">Exportar</button>
+          </div>
+          <div class="import-row">
+            <label class="ghost small file-button">
+              Importar
+              <input id="importInput" type="file" accept="application/json" />
+            </label>
+            <button class="danger small" type="button" data-action="clear-history">Limpar</button>
+          </div>
+          <div id="historyList" class="history-list"></div>
+        </section>
+      </main>
+
+      <section id="timerBar" class="timer-bar" aria-live="polite"></section>
+
+      <nav class="bottom-nav" aria-label="Navegacao principal">
+        <button class="nav-button is-active" type="button" data-view="workout">
+          <span aria-hidden="true">✓</span>
+          Hoje
+        </button>
+        <button class="nav-button" type="button" data-view="edit">
+          <span aria-hidden="true">✎</span>
+          Editar
+        </button>
+        <button class="nav-button" type="button" data-view="history">
+          <span aria-hidden="true">◷</span>
+          Histórico
+        </button>
+      </nav>
+    </div>
+
+    <script src="./app.js?v=3" defer></script>
+  </body>
+</html>

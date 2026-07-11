@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-label="Treino A/B">
+  <rect width="96" height="96" rx="22" fill="#111413"/>
+  <rect x="16" y="39" width="8" height="18" rx="3" fill="#e85f43"/>
+  <rect x="26" y="34" width="8" height="28" rx="3" fill="#f2b63d"/>
+  <rect x="38" y="45" width="20" height="6" rx="3" fill="#f5f7f6"/>
+  <rect x="62" y="34" width="8" height="28" rx="3" fill="#20c287"/>
+  <rect x="72" y="39" width="8" height="18" rx="3" fill="#276ef1"/>
+  <path d="M29 74h38" stroke="#f5f7f6" stroke-width="6" stroke-linecap="round"/>
+  <path d="M35 22h26" stroke="#20c287" stroke-width="6" stroke-linecap="round"/>
+</svg>
