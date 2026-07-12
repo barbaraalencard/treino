@@ -93,6 +93,25 @@ export async function createFirebaseSync({
     });
   }
 
+  async function consumeRedirectResult() {
+    if (!authSdk.getRedirectResult) return null;
+
+    try {
+      const result = await authSdk.getRedirectResult(auth);
+      if (!result?.user) return null;
+      refreshRefs();
+      setStatus("ok", "Conta Google conectada", "Login concluído e backup vinculado a esta conta.");
+      return result.user;
+    } catch (error) {
+      setStatus(
+        "error",
+        "Login Google falhou",
+        error?.message || "Não consegui concluir o retorno do Google."
+      );
+      return null;
+    }
+  }
+
   async function ensureSignedIn() {
     if (auth.currentUser) {
       refreshRefs();
@@ -108,6 +127,7 @@ export async function createFirebaseSync({
 
   await setLocalPersistence();
   await waitForInitialAuthState();
+  await consumeRedirectResult();
   await ensureSignedIn();
 
   authSdk.onAuthStateChanged(auth, (user) => {
@@ -215,25 +235,14 @@ export async function createFirebaseSync({
 
   async function signInWithGoogle() {
     const provider = new authSdk.GoogleAuthProvider();
-    setStatus("syncing", "Abrindo login Google", "Finalize o acesso na janela do Google.");
+    if (provider.setCustomParameters) {
+      provider.setCustomParameters({ prompt: "select_account" });
+    }
+
+    setStatus("syncing", "Abrindo login Google", "Você será redirecionado ao Google e voltará para o app.");
 
     try {
-      if (auth.currentUser?.isAnonymous) {
-        try {
-          await authSdk.linkWithPopup(auth.currentUser, provider);
-        } catch (error) {
-          if (!["auth/credential-already-in-use", "auth/email-already-in-use", "auth/provider-already-linked"].includes(error?.code)) {
-            throw error;
-          }
-          await authSdk.signInWithPopup(auth, provider);
-        }
-      } else {
-        await authSdk.signInWithPopup(auth, provider);
-      }
-
-      refreshRefs();
-      setStatus("ok", "Conta Google conectada", "Seu backup agora fica vinculado a esta conta.");
-      await syncNow();
+      await authSdk.signInWithRedirect(auth, provider);
       return getAuthMeta();
     } catch (error) {
       setStatus("error", "Login Google falhou", error?.message || "Nao foi possivel conectar com Google.");

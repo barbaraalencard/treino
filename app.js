@@ -1704,7 +1704,7 @@ async function initFirebaseSync() {
   });
 
   try {
-    const module = await import("./firebase-sync.js?v=4");
+    const module = await import("./firebase-sync.js?v=5");
     firebaseSync = await module.createFirebaseSync({
       ...setup,
       getLocalState: getStateForSync,
