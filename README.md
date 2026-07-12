@@ -36,8 +36,10 @@ O app continua funcionando sem Firebase. Para ativar o backup na nuvem:
 3. Opcionalmente, ative Google e Email/Password para usar conta fixa.
 4. Em Configurações do projeto > Geral, adicione um app Web.
 5. Copie o objeto `firebaseConfig`.
-6. Cole os valores em `firebase-config.js` e troque `enabled` para `true`.
-7. Na aba Regras do Cloud Firestore, cole o conteúdo de `firestore.rules` e publique.
+6. Copie `firebase-config.local.example.js` para `firebase-config.local.js`.
+7. Cole os valores reais em `firebase-config.local.js` e troque `enabled` para `true`.
+8. Nao envie `firebase-config.local.js` para o GitHub.
+9. Na aba Regras do Cloud Firestore, cole o conteúdo de `firestore.rules` e publique.
 
 Os dados são salvos em:
 
@@ -57,6 +59,9 @@ manifest.webmanifest
 sw.js
 assets/icon.svg
 firebase-config.js
+firebase-config.local.example.js
 firebase-sync.js
 firestore.rules
 ```
+
+`firebase-config.js` fica com valores vazios para ser seguro no GitHub. O arquivo real deve ser `firebase-config.local.js`, que esta no `.gitignore`.
