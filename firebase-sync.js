@@ -58,6 +58,41 @@ export async function createFirebaseSync({
     onStatus?.({ state, label, detail, ...getAuthMeta() });
   }
 
+  async function setLocalPersistence() {
+    if (!authSdk.setPersistence || !authSdk.browserLocalPersistence) return;
+    try {
+      await authSdk.setPersistence(auth, authSdk.browserLocalPersistence);
+    } catch {
+      // Some embedded/private browsers can block local persistence. Firebase will keep its fallback.
+    }
+  }
+
+  async function waitForInitialAuthState() {
+    setStatus("connecting", "Recuperando sessão", "Conferindo se já existe uma conta Google salva neste navegador.");
+
+    if (typeof auth.authStateReady === "function") {
+      await auth.authStateReady();
+      refreshRefs();
+      return auth.currentUser;
+    }
+
+    return new Promise((resolve) => {
+      const unsubscribe = authSdk.onAuthStateChanged(
+        auth,
+        (user) => {
+          unsubscribe();
+          refreshRefs();
+          resolve(user);
+        },
+        () => {
+          unsubscribe();
+          refreshRefs();
+          resolve(auth.currentUser);
+        }
+      );
+    });
+  }
+
   async function ensureSignedIn() {
     if (auth.currentUser) {
       refreshRefs();
@@ -71,6 +106,8 @@ export async function createFirebaseSync({
     return credential.user;
   }
 
+  await setLocalPersistence();
+  await waitForInitialAuthState();
   await ensureSignedIn();
 
   authSdk.onAuthStateChanged(auth, (user) => {

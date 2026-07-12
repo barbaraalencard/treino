@@ -95,6 +95,7 @@ const elements = {
   workoutView: document.querySelector("#workoutView"),
   editView: document.querySelector("#editView"),
   historyView: document.querySelector("#historyView"),
+  pageJumpButtons: document.querySelector("#pageJumpButtons"),
   progressPanel: document.querySelector("#progressPanel"),
   pendingPanel: document.querySelector("#pendingPanel"),
   exerciseList: document.querySelector("#exerciseList"),
@@ -133,8 +134,8 @@ function upgradeShellMarkup() {
   document.title = "Treino";
 
   const stylesheet = document.querySelector('link[rel="stylesheet"]');
-  if (stylesheet && !stylesheet.getAttribute("href")?.includes("v=7")) {
-    stylesheet.setAttribute("href", "./styles.css?v=7");
+  if (stylesheet && !stylesheet.getAttribute("href")?.includes("v=8")) {
+    stylesheet.setAttribute("href", "./styles.css?v=8");
   }
 
   if (!elements.workoutSwitcher) {
@@ -165,6 +166,19 @@ function upgradeShellMarkup() {
     elements.historyList.before(history);
     elements.exerciseHistory = history;
   }
+
+  if (!elements.pageJumpButtons) {
+    const jumpButtons = document.createElement("section");
+    jumpButtons.id = "pageJumpButtons";
+    jumpButtons.className = "page-jump";
+    jumpButtons.setAttribute("aria-label", "Atalhos de rolagem");
+    jumpButtons.innerHTML = `
+      <button type="button" data-action="scroll-top" aria-label="Subir para o início">↑</button>
+      <button type="button" data-action="scroll-bottom" aria-label="Descer para o final">↓</button>
+    `;
+    (elements.timerBar || document.querySelector("main")).after(jumpButtons);
+    elements.pageJumpButtons = jumpButtons;
+  }
 }
 
 function createDefaultState() {
@@ -179,6 +193,9 @@ function createDefaultState() {
     settings: {
       vibration: true,
       sound: true
+    },
+    ui: {
+      collapsedEdit: {}
     }
   };
 }
@@ -201,6 +218,11 @@ function loadState() {
       settings: {
         vibration: saved.settings?.vibration !== false,
         sound: saved.settings?.sound !== false
+      },
+      ui: {
+        collapsedEdit: saved.ui?.collapsedEdit && typeof saved.ui.collapsedEdit === "object"
+          ? saved.ui.collapsedEdit
+          : {}
       }
     };
   } catch {
@@ -259,6 +281,14 @@ function saveState(options = {}) {
   syncInfo.localUpdatedAtMs = Date.now();
   saveSyncInfo();
   queueFirebaseSave();
+}
+
+function getUiState() {
+  if (!state.ui || typeof state.ui !== "object") state.ui = {};
+  if (!state.ui.collapsedEdit || typeof state.ui.collapsedEdit !== "object") {
+    state.ui.collapsedEdit = {};
+  }
+  return state.ui;
 }
 
 function uid(prefix = "item") {
@@ -593,6 +623,7 @@ function renderShell() {
   elements.workoutView.classList.toggle("is-active", state.activeView === "workout");
   elements.editView.classList.toggle("is-active", state.activeView === "edit");
   elements.historyView.classList.toggle("is-active", state.activeView === "history");
+  elements.pageJumpButtons?.classList.toggle("is-visible", state.activeView === "edit");
 }
 
 function renderWorkout() {
@@ -834,20 +865,24 @@ function renderEditCard(exercise, index, total) {
       </label>
     `
     : "";
+  const isCollapsed = Boolean(getUiState().collapsedEdit[exercise.id]);
 
   return `
-    <article class="edit-card">
+    <article class="edit-card ${isCollapsed ? "is-collapsed" : ""}">
       <div class="edit-card-head">
         <div>
           <p class="eyebrow">${escapeHTML(getTypeLabel(type))}</p>
           <h3>${escapeHTML(getExerciseLabel(exercise) || "Novo exercício")}</h3>
         </div>
         <div class="move-row">
+          <button class="mini-icon" type="button" data-action="toggle-edit-collapse" data-exercise="${escapeAttr(exercise.id)}" aria-label="${isCollapsed ? "Expandir exercício" : "Encolher exercício"}">${isCollapsed ? "+" : "−"}</button>
           <button class="mini-icon" type="button" data-action="move-exercise" data-exercise="${escapeAttr(exercise.id)}" data-direction="-1" aria-label="Subir exercício" ${index === 0 ? "disabled" : ""}>↑</button>
           <button class="mini-icon" type="button" data-action="move-exercise" data-exercise="${escapeAttr(exercise.id)}" data-direction="1" aria-label="Descer exercício" ${index === total - 1 ? "disabled" : ""}>↓</button>
           <button class="mini-icon" type="button" data-action="delete-exercise" data-exercise="${escapeAttr(exercise.id)}" aria-label="Excluir exercício">×</button>
         </div>
       </div>
+      ${renderEditSummary(exercise)}
+      ${isCollapsed ? "" : `
       <div class="edit-grid">
         <label class="field wide">
           <span>Nome</span>
@@ -879,7 +914,19 @@ function renderEditCard(exercise, index, total) {
         ${dropFields}
         ${unilateralFields}
       </div>
+      `}
     </article>
+  `;
+}
+
+function renderEditSummary(exercise) {
+  return `
+    <div class="edit-summary">
+      <span>${parseInteger(exercise.sets, 0)} séries</span>
+      <span>${escapeHTML(exercise.reps || "-")} reps</span>
+      <span>${formatRest(exercise.rest)}</span>
+      <span>${formatWeight(exercise.startingWeight)}</span>
+    </div>
   `;
 }
 
@@ -1248,6 +1295,7 @@ function deleteExercise(exerciseId) {
   if (!ok) return;
   activeWorkout().splice(index, 1);
   delete state.drafts[state.activeWorkout]?.logs?.[exerciseId];
+  delete getUiState().collapsedEdit[exerciseId];
   if (state.timer?.exerciseId === exerciseId) stopTimer(false);
   saveState();
   render();
@@ -1261,6 +1309,15 @@ function moveExercise(exerciseId, direction) {
   const [item] = workout.splice(from, 1);
   workout.splice(to, 0, item);
   saveState();
+  render();
+}
+
+function toggleEditCollapse(exerciseId) {
+  const exercise = findExercise(exerciseId);
+  if (!exercise) return;
+  const ui = getUiState();
+  ui.collapsedEdit[exerciseId] = !ui.collapsedEdit[exerciseId];
+  saveState({ sync: false });
   render();
 }
 
@@ -1647,7 +1704,7 @@ async function initFirebaseSync() {
   });
 
   try {
-    const module = await import("./firebase-sync.js?v=3");
+    const module = await import("./firebase-sync.js?v=4");
     firebaseSync = await module.createFirebaseSync({
       ...setup,
       getLocalState: getStateForSync,
@@ -1804,6 +1861,7 @@ function handleClick(event) {
   else if (action === "delete-workout") deleteWorkout();
   else if (action === "delete-exercise") deleteExercise(exerciseId);
   else if (action === "move-exercise") moveExercise(exerciseId, actionElement.dataset.direction);
+  else if (action === "toggle-edit-collapse") toggleEditCollapse(exerciseId);
   else if (action === "toggle-combo") toggleCombo(exerciseId);
   else if (action === "set-exercise-type") setExerciseType(exerciseId, actionElement.dataset.type);
   else if (action === "timer-toggle") pauseOrResumeTimer();
@@ -1820,6 +1878,8 @@ function handleClick(event) {
   else if (action === "login-email") loginEmail();
   else if (action === "signup-email") signupEmail();
   else if (action === "logout-firebase") logoutFirebase();
+  else if (action === "scroll-top") scrollToTop();
+  else if (action === "scroll-bottom") scrollToBottom();
 }
 
 function handleInput(event) {
@@ -1853,6 +1913,17 @@ function scrollToTop() {
     document.documentElement.scrollTop = 0;
     document.body.scrollTop = 0;
     window.scrollTo(0, 0);
+  });
+}
+
+function scrollToBottom() {
+  window.requestAnimationFrame(() => {
+    const bottom = Math.max(
+      document.documentElement.scrollHeight,
+      document.body.scrollHeight,
+      0
+    );
+    window.scrollTo({ top: bottom, behavior: "smooth" });
   });
 }
 

@@ -594,12 +594,16 @@ h4 {
   padding: 12px;
 }
 
+.edit-card.is-collapsed {
+  padding-bottom: 10px;
+}
+
 .edit-card-head {
   display: flex;
   gap: 8px;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 
 .edit-card-head > div:first-child {
@@ -631,6 +635,30 @@ h4 {
   border-radius: var(--radius);
   background: #f9fbfa;
   color: var(--text);
+  font-weight: 900;
+}
+
+.mini-icon:disabled {
+  opacity: 0.42;
+}
+
+.edit-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.edit-card.is-collapsed .edit-summary {
+  margin-bottom: 0;
+}
+
+.edit-summary span {
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  background: #eef4ef;
+  color: var(--muted);
+  font-size: 0.76rem;
   font-weight: 900;
 }
 
@@ -1012,6 +1040,33 @@ h4 {
   border-radius: var(--radius);
   background: rgba(255, 255, 255, 0.08);
   color: #fff;
+  font-weight: 900;
+}
+
+.page-jump {
+  position: fixed;
+  right: max(14px, calc((100vw - 520px) / 2 + 14px));
+  bottom: calc(94px + env(safe-area-inset-bottom));
+  z-index: 24;
+  display: none;
+  gap: 8px;
+}
+
+.page-jump.is-visible {
+  display: grid;
+}
+
+.page-jump button {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  place-items: center;
+  border: 1px solid rgba(17, 20, 19, 0.1);
+  border-radius: 50%;
+  background: var(--surface-strong);
+  color: #fff;
+  box-shadow: 0 12px 28px rgba(20, 28, 24, 0.2);
+  font-size: 1.12rem;
   font-weight: 900;
 }
 
