@@ -1,5 +1,14 @@
 const STORAGE_KEY = "treino-ab:v1";
+const SYNC_META_KEY = "treino-ab:sync-meta:v1";
 const HISTORY_LIMIT = 160;
+const TYPE_LABELS = {
+  normal: "Exercício",
+  "bi-set": "Bi-set",
+  "tri-set": "Tri-set",
+  "drop-set": "Drop-set",
+  unilateral: "Unilateral"
+};
+const TYPE_OPTIONS = ["normal", "bi-set", "tri-set", "drop-set", "unilateral"];
 
 const DEFAULT_WORKOUTS = {
   A: [
@@ -82,6 +91,7 @@ const DEFAULT_WORKOUTS = {
 
 const elements = {
   screenTitle: document.querySelector("#screenTitle"),
+  workoutSwitcher: document.querySelector("#workoutSwitcher"),
   workoutView: document.querySelector("#workoutView"),
   editView: document.querySelector("#editView"),
   historyView: document.querySelector("#historyView"),
@@ -90,19 +100,79 @@ const elements = {
   exerciseList: document.querySelector("#exerciseList"),
   editTitle: document.querySelector("#editTitle"),
   editList: document.querySelector("#editList"),
+  exerciseHistory: document.querySelector("#exerciseHistory"),
   historyList: document.querySelector("#historyList"),
+  syncPanel: document.querySelector("#syncPanel"),
   timerBar: document.querySelector("#timerBar"),
   importInput: document.querySelector("#importInput")
 };
 
+upgradeShellMarkup();
+
 let state = loadState();
+let syncInfo = loadSyncInfo(state);
+let firebaseSync = null;
+let firebaseStatus = {
+  state: "idle",
+  label: "Firebase não configurado",
+  detail: "Preencha firebase-config.js para ativar o backup na nuvem.",
+  uid: "",
+  email: "",
+  isAnonymous: true,
+  provider: "",
+  path: ""
+};
+let authForm = {
+  email: "",
+  password: ""
+};
+let isApplyingRemoteState = false;
 let ticker = null;
 
+function upgradeShellMarkup() {
+  document.title = "Treino";
+
+  const stylesheet = document.querySelector('link[rel="stylesheet"]');
+  if (stylesheet && !stylesheet.getAttribute("href")?.includes("v=7")) {
+    stylesheet.setAttribute("href", "./styles.css?v=7");
+  }
+
+  if (!elements.workoutSwitcher) {
+    const legacySwitcher = document.querySelector(".switcher");
+    if (legacySwitcher) {
+      legacySwitcher.id = "workoutSwitcher";
+      legacySwitcher.innerHTML = "";
+      elements.workoutSwitcher = legacySwitcher;
+    }
+  }
+
+  const oldAddButton = document.querySelector('#editView .section-head > button[data-action="add-exercise"]');
+  if (oldAddButton && !document.querySelector(".edit-actions")) {
+    const actions = document.createElement("div");
+    actions.className = "edit-actions";
+    actions.innerHTML = `
+      <button class="ghost small" type="button" data-action="delete-workout">Excluir treino</button>
+      <button class="ghost small" type="button" data-action="add-workout">+ Treino</button>
+      <button class="primary small" type="button" data-action="add-exercise">+ Exercício</button>
+    `;
+    oldAddButton.replaceWith(actions);
+  }
+
+  if (!elements.exerciseHistory && elements.historyList) {
+    const history = document.createElement("div");
+    history.id = "exerciseHistory";
+    history.className = "exercise-history";
+    elements.historyList.before(history);
+    elements.exerciseHistory = history;
+  }
+}
+
 function createDefaultState() {
+  const workouts = normalizeWorkouts(DEFAULT_WORKOUTS);
   return {
     activeWorkout: "A",
     activeView: "workout",
-    workouts: structuredClone(DEFAULT_WORKOUTS),
+    workouts,
     drafts: {},
     history: [],
     timer: null,
@@ -117,14 +187,15 @@ function loadState() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
     if (!saved || typeof saved !== "object") return createDefaultState();
+    const workouts = normalizeWorkouts(saved.workouts);
+    const workoutIds = Object.keys(workouts);
+    const activeWorkout = workouts[saved.activeWorkout] ? saved.activeWorkout : workoutIds[0] || "A";
 
     return {
       ...createDefaultState(),
       ...saved,
-      workouts: {
-        A: Array.isArray(saved.workouts?.A) ? saved.workouts.A : structuredClone(DEFAULT_WORKOUTS.A),
-        B: Array.isArray(saved.workouts?.B) ? saved.workouts.B : structuredClone(DEFAULT_WORKOUTS.B)
-      },
+      workouts,
+      activeWorkout,
       drafts: saved.drafts && typeof saved.drafts === "object" ? saved.drafts : {},
       history: Array.isArray(saved.history) ? saved.history : [],
       settings: {
@@ -137,8 +208,57 @@ function loadState() {
   }
 }
 
-function saveState() {
+function loadSyncInfo(currentState) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SYNC_META_KEY));
+    if (saved && typeof saved === "object") {
+      return {
+        localUpdatedAtMs: Number(saved.localUpdatedAtMs) || 0,
+        remoteUpdatedAtMs: Number(saved.remoteUpdatedAtMs) || 0,
+        lastSyncAtMs: Number(saved.lastSyncAtMs) || 0
+      };
+    }
+  } catch {
+    // Keep a fresh meta object when old data is malformed.
+  }
+
+  return {
+    localUpdatedAtMs: hasUsefulLocalData(currentState) ? Date.now() : 0,
+    remoteUpdatedAtMs: 0,
+    lastSyncAtMs: 0
+  };
+}
+
+function saveSyncInfo() {
+  localStorage.setItem(SYNC_META_KEY, JSON.stringify(syncInfo));
+}
+
+function hasUsefulLocalData(candidateState) {
+  if (!candidateState || typeof candidateState !== "object") return false;
+  if (Array.isArray(candidateState.history) && candidateState.history.length) return true;
+
+  const draftHasProgress = Object.values(candidateState.drafts || {}).some((draft) =>
+    Object.values(draft?.logs || {}).some((log) =>
+      Boolean(log?.done) ||
+      Boolean(log?.skipped) ||
+      Boolean(log?.notes) ||
+      parseNumber(log?.weight, 0) > 0 ||
+      parseNumber(log?.comboWeight, 0) > 0 ||
+      parseNumber(log?.combo2Weight, 0) > 0
+    )
+  );
+  if (draftHasProgress) return true;
+
+  const defaultWorkouts = normalizeWorkouts(DEFAULT_WORKOUTS);
+  return JSON.stringify(candidateState.workouts || {}) !== JSON.stringify(defaultWorkouts);
+}
+
+function saveState(options = {}) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  if (options.sync === false || isApplyingRemoteState) return;
+  syncInfo.localUpdatedAtMs = Date.now();
+  saveSyncInfo();
+  queueFirebaseSave();
 }
 
 function uid(prefix = "item") {
@@ -147,6 +267,155 @@ function uid(prefix = "item") {
 
 function activeWorkout() {
   return state.workouts[state.activeWorkout] || [];
+}
+
+function getWorkoutIds() {
+  return Object.keys(state.workouts || {}).sort((a, b) => a.localeCompare(b, "pt-BR", { numeric: true }));
+}
+
+function getNextWorkoutId() {
+  const ids = getWorkoutIds();
+  const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const nextLetter = letters.split("").find((letter) => !ids.includes(letter));
+  if (nextLetter) return nextLetter;
+  let index = ids.length + 1;
+  while (ids.includes(String(index))) index += 1;
+  return String(index);
+}
+
+function normalizeWorkouts(workouts = {}) {
+  const source = workouts && typeof workouts === "object" ? workouts : {};
+  const normalized = {};
+
+  Object.entries(source).forEach(([id, workout]) => {
+    if (!Array.isArray(workout)) return;
+    const safeId = String(id || "").trim().toUpperCase();
+    if (!safeId) return;
+    normalized[safeId] = normalizeWorkout(workout);
+  });
+
+  if (!Object.keys(normalized).length) {
+    normalized.A = normalizeWorkout(DEFAULT_WORKOUTS.A);
+    normalized.B = normalizeWorkout(DEFAULT_WORKOUTS.B);
+  }
+
+  return normalized;
+}
+
+function normalizeWorkout(workout = []) {
+  return workout.map((exercise) => normalizeExercise(exercise));
+}
+
+function normalizeExercise(exercise = {}) {
+  const combo = exercise.combo || {};
+  const combo2 = exercise.combo2 || {};
+  const type = TYPE_OPTIONS.includes(exercise.type)
+    ? exercise.type
+    : combo.enabled
+      ? "bi-set"
+      : "normal";
+  const comboEnabled = type === "bi-set" || type === "tri-set" || Boolean(combo.enabled);
+  const combo2Enabled = type === "tri-set" || Boolean(combo2.enabled);
+
+  return {
+    id: exercise.id || uid("exercise"),
+    name: exercise.name || "Novo exercício",
+    type,
+    sets: clamp(parseInteger(exercise.sets, 3), 1, 12),
+    reps: exercise.reps || "",
+    rest: clamp(parseInteger(exercise.rest, 75), 0, 600),
+    startingWeight: Math.max(0, parseNumber(exercise.startingWeight, 0)),
+    note: exercise.note || "",
+    dropSets: clamp(parseInteger(exercise.dropSets, 2), 1, 6),
+    unilateralMode: exercise.unilateralMode || "ambos",
+    combo: {
+      enabled: comboEnabled,
+      name: combo.name || "",
+      reps: combo.reps || "",
+      startingWeight: Math.max(0, parseNumber(combo.startingWeight, 0)),
+      note: combo.note || ""
+    },
+    combo2: {
+      enabled: combo2Enabled,
+      name: combo2.name || "",
+      reps: combo2.reps || "",
+      startingWeight: Math.max(0, parseNumber(combo2.startingWeight, 0)),
+      note: combo2.note || ""
+    }
+  };
+}
+
+function ensureCombo(exercise) {
+  if (!exercise.combo) {
+    exercise.combo = {
+      enabled: false,
+      name: "",
+      reps: "",
+      startingWeight: 0,
+      note: ""
+    };
+  }
+  return exercise.combo;
+}
+
+function ensureCombo2(exercise) {
+  if (!exercise.combo2) {
+    exercise.combo2 = {
+      enabled: false,
+      name: "",
+      reps: "",
+      startingWeight: 0,
+      note: ""
+    };
+  }
+  return exercise.combo2;
+}
+
+function getCombo(exercise) {
+  return getCombos(exercise)[0] || null;
+}
+
+function getExerciseType(exercise) {
+  if (TYPE_OPTIONS.includes(exercise.type)) return exercise.type;
+  return exercise.combo?.enabled ? "bi-set" : "normal";
+}
+
+function getTypeLabel(type) {
+  return TYPE_LABELS[type] || TYPE_LABELS.normal;
+}
+
+function getCombos(exercise) {
+  const type = getExerciseType(exercise);
+  const combos = [];
+  const combo = exercise.combo;
+  const combo2 = exercise.combo2;
+
+  if ((type === "bi-set" || type === "tri-set") && combo?.enabled) {
+    combos.push({ ...combo, field: "comboWeight", index: 0 });
+  }
+
+  if (type === "tri-set" && combo2?.enabled) {
+    combos.push({ ...combo2, field: "combo2Weight", index: 1 });
+  }
+
+  return combos;
+}
+
+function getExerciseLabel(exercise) {
+  const names = [exercise.name, ...getCombos(exercise).map((combo) => combo.name).filter(Boolean)];
+  return names.join(" + ");
+}
+
+function getComboEntry(entry, index = 0) {
+  if (Array.isArray(entry?.combos)) return entry.combos[index] || null;
+  if (index === 0) return entry?.combo || null;
+  return null;
+}
+
+function getWeightField(kind = "main") {
+  if (kind === "combo") return "comboWeight";
+  if (kind === "combo2") return "combo2Weight";
+  return "weight";
 }
 
 function getDraft(workoutId = state.activeWorkout) {
@@ -158,14 +427,26 @@ function getDraft(workoutId = state.activeWorkout) {
   }
 
   for (const exercise of state.workouts[workoutId] || []) {
+    const combos = getCombos(exercise);
     if (!state.drafts[workoutId].logs[exercise.id]) {
       const last = getLastEntry(workoutId, exercise);
       state.drafts[workoutId].logs[exercise.id] = {
         done: 0,
         weight: last?.weight ?? exercise.startingWeight ?? 0,
+        comboWeight: getComboEntry(last, 0)?.weight ?? combos[0]?.startingWeight ?? 0,
+        combo2Weight: getComboEntry(last, 1)?.weight ?? combos[1]?.startingWeight ?? 0,
         notes: "",
         skipped: false
       };
+    } else if (combos.length) {
+      const last = getLastEntry(workoutId, exercise);
+      const log = state.drafts[workoutId].logs[exercise.id];
+      if (log.comboWeight === undefined || log.comboWeight === null || log.comboWeight === "") {
+        log.comboWeight = getComboEntry(last, 0)?.weight ?? combos[0]?.startingWeight ?? 0;
+      }
+      if (combos[1] && (log.combo2Weight === undefined || log.combo2Weight === null || log.combo2Weight === "")) {
+        log.combo2Weight = getComboEntry(last, 1)?.weight ?? combos[1]?.startingWeight ?? 0;
+      }
     }
   }
 
@@ -272,18 +553,36 @@ function getLastEntry(workoutId, exercise) {
   return null;
 }
 
+function getLoadSuggestion(exercise, lastEntry = null) {
+  if (!lastEntry) return formatWeight(exercise.startingWeight);
+  if (lastEntry.skipped || parseInteger(lastEntry.doneSets, 0) < parseInteger(lastEntry.plannedSets, 0)) {
+    return `Manter ${formatWeight(lastEntry.weight)}`;
+  }
+  return `${formatWeight(parseNumber(lastEntry.weight, 0) + 2.5)}`;
+}
+
 function render() {
   getDraft(state.activeWorkout);
-  saveState();
+  saveState({ sync: false });
   renderShell();
   renderWorkout();
   renderEdit();
   renderHistory();
+  renderSyncPanel();
   renderTimer();
 }
 
 function renderShell() {
   elements.screenTitle.textContent = `Treino ${state.activeWorkout}`;
+  if (elements.workoutSwitcher) {
+    elements.workoutSwitcher.innerHTML = getWorkoutIds()
+      .map((workoutId) => `
+        <button class="switch-button ${workoutId === state.activeWorkout ? "is-active" : ""}" type="button" data-workout="${escapeAttr(workoutId)}">
+          Treino ${escapeHTML(workoutId)}
+        </button>
+      `)
+      .join("");
+  }
   document.querySelectorAll("[data-workout]").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.workout === state.activeWorkout);
   });
@@ -304,6 +603,7 @@ function renderWorkout() {
   const draft = getDraft(workoutId);
   const startedAt = new Date(draft.startedAt).getTime();
   const elapsed = Number.isFinite(startedAt) ? Math.round((Date.now() - startedAt) / 1000) : 0;
+  const nextExercise = totals.pending[0];
 
   elements.progressPanel.innerHTML = `
     <div class="progress-grid">
@@ -316,6 +616,10 @@ function renderWorkout() {
           <span></span>
         </div>
         <p>${totals.pending.length} exercício${totals.pending.length === 1 ? "" : "s"} pendente${totals.pending.length === 1 ? "" : "s"} · ${formatDuration(elapsed)}</p>
+        <div class="next-box">
+          <span>Próximo</span>
+          <strong>${nextExercise ? escapeHTML(getExerciseLabel(nextExercise)) : "Treino completo"}</strong>
+        </div>
       </div>
       <div class="round-meter" style="--angle: ${progressAngle}">
         <span>${totals.completion}%</span>
@@ -325,7 +629,7 @@ function renderWorkout() {
 
   elements.pendingPanel.innerHTML = totals.pending.length
     ? totals.pending
-        .map((exercise) => `<span class="chip">${escapeHTML(exercise.name)}</span>`)
+        .map((exercise) => `<span class="chip">${escapeHTML(getExerciseLabel(exercise))}</span>`)
         .join("")
     : `<span class="chip done">Treino completo</span>`;
 
@@ -334,7 +638,23 @@ function renderWorkout() {
     return;
   }
 
-  elements.exerciseList.innerHTML = workout.map((exercise) => renderExerciseCard(exercise)).join("");
+  const pendingIds = new Set(totals.pending.map((exercise) => exercise.id));
+  const pendingExercises = workout.filter((exercise) => pendingIds.has(exercise.id));
+  const completedExercises = workout.filter((exercise) => !pendingIds.has(exercise.id));
+  elements.exerciseList.innerHTML = [
+    renderExerciseSection("Pendentes", pendingExercises),
+    renderExerciseSection("Concluídos", completedExercises)
+  ].join("");
+}
+
+function renderExerciseSection(title, exercises) {
+  if (!exercises.length) return "";
+  return `
+    <section class="exercise-section">
+      <div class="list-label">${escapeHTML(title)}</div>
+      ${exercises.map((exercise) => renderExerciseCard(exercise)).join("")}
+    </section>
+  `;
 }
 
 function renderExerciseCard(exercise) {
@@ -344,6 +664,9 @@ function renderExerciseCard(exercise) {
   const isComplete = done >= sets;
   const isSkipped = Boolean(log.skipped);
   const lastEntry = getLastEntry(state.activeWorkout, exercise);
+  const type = getExerciseType(exercise);
+  const combos = getCombos(exercise);
+  const suggestion = getLoadSuggestion(exercise, lastEntry);
   const statusText = isSkipped ? "Pulado" : isComplete ? "Completo" : `${done}/${sets}`;
   const statusClass = isSkipped ? "skip" : isComplete ? "done" : "";
   const className = [
@@ -365,13 +688,40 @@ function renderExerciseCard(exercise) {
       </button>
     `;
   }).join("");
+  const comboPanels = combos
+    .map((combo, index) => `
+      <div class="combo-panel">
+        <div>
+          <p class="eyebrow">Parte ${index + 2}</p>
+          <h4>${escapeHTML(combo.name || "Exercício combinado")}</h4>
+        </div>
+        <div class="combo-facts">
+          <span>${escapeHTML(combo.reps || "-")} reps</span>
+          <span>Última ${formatWeight(getComboEntry(lastEntry, index)?.weight ?? combo.startingWeight)}</span>
+        </div>
+      </div>
+    `)
+    .join("");
+  const comboWeightBlocks = combos
+    .map((combo) => renderWeightBlock({
+      exercise,
+      label: `Peso - ${combo.name || "combinado"}`,
+      value: log[combo.field] ?? getComboEntry(lastEntry, combo.index)?.weight ?? combo.startingWeight ?? 0,
+      kind: combo.field === "combo2Weight" ? "combo2" : "combo"
+    }))
+    .join("");
+  const typeDetail = type === "drop-set"
+    ? `<span>${parseInteger(exercise.dropSets, 2)} drops</span>`
+    : type === "unilateral"
+      ? `<span>${escapeHTML(exercise.unilateralMode || "ambos")}</span>`
+      : "";
 
   return `
     <article class="${className}" data-exercise-card="${escapeAttr(exercise.id)}">
       <div class="exercise-header">
         <div>
-          <p class="eyebrow">Exercício</p>
-          <h3>${escapeHTML(exercise.name)}</h3>
+          <p class="eyebrow">${escapeHTML(getTypeLabel(type))}</p>
+          <h3>${escapeHTML(getExerciseLabel(exercise))}</h3>
         </div>
         <span class="status-pill ${statusClass}">${statusText}</span>
       </div>
@@ -389,20 +739,25 @@ function renderExerciseCard(exercise) {
           <span>Última</span>
           <strong>${lastEntry ? formatWeight(lastEntry.weight) : formatWeight(exercise.startingWeight)}</strong>
         </div>
+        <div class="meta-item">
+          <span>Sugestão</span>
+          <strong>${escapeHTML(suggestion)}</strong>
+        </div>
+        ${typeDetail ? `<div class="meta-item">${typeDetail}<strong>${escapeHTML(getTypeLabel(type))}</strong></div>` : ""}
       </div>
+      ${comboPanels}
 
       <div class="set-track" style="--sets: ${sets}">
         ${setButtons}
       </div>
 
-      <div class="weight-row">
-        <button type="button" data-action="weight-step" data-exercise="${escapeAttr(exercise.id)}" data-delta="-2.5" aria-label="Diminuir peso">−</button>
-        <input type="number" inputmode="decimal" step="0.5" min="0"
-          data-action="weight-input" data-exercise="${escapeAttr(exercise.id)}"
-          aria-label="Peso usado em ${escapeAttr(exercise.name)}"
-          value="${escapeAttr(log.weight ?? 0)}" />
-        <button type="button" data-action="weight-step" data-exercise="${escapeAttr(exercise.id)}" data-delta="2.5" aria-label="Aumentar peso">+</button>
-      </div>
+      ${renderWeightBlock({
+        exercise,
+        label: `Peso - ${exercise.name}`,
+        value: log.weight ?? 0,
+        kind: "main"
+      })}
+      ${comboWeightBlocks}
 
       <div class="action-row">
         <button class="primary" type="button" data-action="mark-set" data-exercise="${escapeAttr(exercise.id)}"
@@ -422,6 +777,22 @@ function renderExerciseCard(exercise) {
   `;
 }
 
+function renderWeightBlock({ exercise, label, value, kind }) {
+  return `
+    <div class="weight-block">
+      <div class="weight-label">${escapeHTML(label)}</div>
+      <div class="weight-row">
+        <button type="button" data-action="weight-step" data-kind="${kind}" data-exercise="${escapeAttr(exercise.id)}" data-delta="-2.5" aria-label="Diminuir ${escapeAttr(label)}">−</button>
+        <input type="number" inputmode="decimal" step="0.5" min="0"
+          data-action="weight-input" data-kind="${kind}" data-exercise="${escapeAttr(exercise.id)}"
+          aria-label="${escapeAttr(label)}"
+          value="${escapeAttr(value ?? 0)}" />
+        <button type="button" data-action="weight-step" data-kind="${kind}" data-exercise="${escapeAttr(exercise.id)}" data-delta="2.5" aria-label="Aumentar ${escapeAttr(label)}">+</button>
+      </div>
+    </div>
+  `;
+}
+
 function renderEdit() {
   const workoutId = state.activeWorkout;
   const workout = activeWorkout();
@@ -438,10 +809,39 @@ function renderEdit() {
 }
 
 function renderEditCard(exercise, index, total) {
+  const combo = ensureCombo(exercise);
+  const combo2 = ensureCombo2(exercise);
+  const type = getExerciseType(exercise);
+  const comboFields = type === "bi-set" || type === "tri-set"
+    ? renderComboEditFields(exercise, "combo", combo, type === "tri-set" ? "2º exercício" : "Exercício combinado")
+    : "";
+  const combo2Fields = type === "tri-set"
+    ? renderComboEditFields(exercise, "combo2", combo2, "3º exercício")
+    : "";
+  const dropFields = type === "drop-set"
+    ? `
+      <label class="field wide">
+        <span>Quantidade de drops</span>
+        <input type="number" inputmode="numeric" min="1" max="6" data-edit-field="dropSets" data-exercise="${escapeAttr(exercise.id)}" value="${escapeAttr(exercise.dropSets ?? 2)}" />
+      </label>
+    `
+    : "";
+  const unilateralFields = type === "unilateral"
+    ? `
+      <label class="field wide">
+        <span>Como registrar</span>
+        <input type="text" data-edit-field="unilateralMode" data-exercise="${escapeAttr(exercise.id)}" value="${escapeAttr(exercise.unilateralMode || "ambos")}" />
+      </label>
+    `
+    : "";
+
   return `
     <article class="edit-card">
       <div class="edit-card-head">
-        <h3>${escapeHTML(exercise.name || "Novo exercício")}</h3>
+        <div>
+          <p class="eyebrow">${escapeHTML(getTypeLabel(type))}</p>
+          <h3>${escapeHTML(getExerciseLabel(exercise) || "Novo exercício")}</h3>
+        </div>
         <div class="move-row">
           <button class="mini-icon" type="button" data-action="move-exercise" data-exercise="${escapeAttr(exercise.id)}" data-direction="-1" aria-label="Subir exercício" ${index === 0 ? "disabled" : ""}>↑</button>
           <button class="mini-icon" type="button" data-action="move-exercise" data-exercise="${escapeAttr(exercise.id)}" data-direction="1" aria-label="Descer exercício" ${index === total - 1 ? "disabled" : ""}>↓</button>
@@ -473,18 +873,114 @@ function renderEditCard(exercise, index, total) {
           <span>Nota fixa</span>
           <textarea data-edit-field="note" data-exercise="${escapeAttr(exercise.id)}">${escapeHTML(exercise.note || "")}</textarea>
         </label>
+        ${renderTypeButtons(exercise, type)}
+        ${comboFields}
+        ${combo2Fields}
+        ${dropFields}
+        ${unilateralFields}
       </div>
     </article>
   `;
 }
 
+function renderTypeButtons(exercise, activeType) {
+  return `
+    <div class="type-control">
+      <span>Tipo</span>
+      <div>
+        ${TYPE_OPTIONS.map((type) => `
+          <button class="${type === activeType ? "is-active" : ""}" type="button"
+            data-action="set-exercise-type" data-exercise="${escapeAttr(exercise.id)}" data-type="${escapeAttr(type)}">
+            ${escapeHTML(getTypeLabel(type))}
+          </button>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderComboEditFields(exercise, prefix, combo, title) {
+  return `
+    <div class="combo-edit-panel">
+      <label class="field wide">
+        <span>${escapeHTML(title)}</span>
+        <input type="text" data-edit-field="${escapeAttr(prefix)}.name" data-exercise="${escapeAttr(exercise.id)}" value="${escapeAttr(combo.name)}" />
+      </label>
+      <label class="field">
+        <span>Reps</span>
+        <input type="text" data-edit-field="${escapeAttr(prefix)}.reps" data-exercise="${escapeAttr(exercise.id)}" value="${escapeAttr(combo.reps)}" />
+      </label>
+      <label class="field">
+        <span>Peso</span>
+        <input type="number" inputmode="decimal" step="0.5" min="0" data-edit-field="${escapeAttr(prefix)}.startingWeight" data-exercise="${escapeAttr(exercise.id)}" value="${escapeAttr(combo.startingWeight ?? 0)}" />
+      </label>
+      <label class="field wide">
+        <span>Nota</span>
+        <textarea data-edit-field="${escapeAttr(prefix)}.note" data-exercise="${escapeAttr(exercise.id)}">${escapeHTML(combo.note || "")}</textarea>
+      </label>
+    </div>
+  `;
+}
+
 function renderHistory() {
+  renderExerciseHistory();
+
   if (!state.history.length) {
     elements.historyList.innerHTML = `<div class="empty-state">Finalize um treino para criar o primeiro registro.</div>`;
     return;
   }
 
   elements.historyList.innerHTML = state.history.map(renderHistoryCard).join("");
+}
+
+function renderExerciseHistory() {
+  if (!elements.exerciseHistory) return;
+  const workout = activeWorkout();
+  if (!workout.length) {
+    elements.exerciseHistory.innerHTML = "";
+    return;
+  }
+
+  const cards = workout
+    .map((exercise) => {
+      const last = getLastEntry(state.activeWorkout, exercise);
+      if (!last) {
+        return `
+          <article class="exercise-history-card">
+            <div>
+              <p class="eyebrow">${escapeHTML(getTypeLabel(getExerciseType(exercise)))}</p>
+              <h3>${escapeHTML(getExerciseLabel(exercise))}</h3>
+            </div>
+            <span>Sem registro</span>
+          </article>
+        `;
+      }
+
+      const suggestion = getLoadSuggestion(exercise, last);
+      const comboLine = (Array.isArray(last.combos) ? last.combos : last.combo ? [last.combo] : [])
+        .map((combo) => `${combo.name}: ${formatWeight(combo.weight)}`)
+        .join(" · ");
+
+      return `
+        <article class="exercise-history-card">
+          <div>
+            <p class="eyebrow">${escapeHTML(getTypeLabel(last.type || getExerciseType(exercise)))}</p>
+            <h3>${escapeHTML(getExerciseLabel(exercise))}</h3>
+            <small>${formatWeight(last.weight)} · ${last.doneSets}/${last.plannedSets} séries${comboLine ? ` · ${escapeHTML(comboLine)}` : ""}</small>
+          </div>
+          <span>${escapeHTML(suggestion)}</span>
+        </article>
+      `;
+    })
+    .join("");
+
+  elements.exerciseHistory.innerHTML = `
+    <div class="history-subhead">
+      <p class="eyebrow">Evolução</p>
+      <h3>Treino ${escapeHTML(state.activeWorkout)}</h3>
+    </div>
+    ${cards}
+  `;
 }
 
 function renderHistoryCard(session) {
@@ -494,9 +990,16 @@ function renderHistoryCard(session) {
       const status = entry.skipped
         ? "pulado"
         : `${entry.doneSets}/${entry.plannedSets} · ${formatWeight(entry.weight)}`;
+      const combos = Array.isArray(entry.combos) ? entry.combos : entry.combo ? [entry.combo] : [];
+      const combo = combos
+        .map((item) => `<small>+ ${escapeHTML(item.name)} · ${formatWeight(item.weight)}</small>`)
+        .join("");
       return `
         <li>
-          <strong>${escapeHTML(entry.name)}</strong>
+          <div>
+            <strong>${escapeHTML(entry.name)}</strong>
+            ${combo}
+          </div>
           <span>${status}</span>
         </li>
       `;
@@ -514,6 +1017,52 @@ function renderHistoryCard(session) {
       </div>
       <ul class="history-exercises">${visibleEntries}</ul>
     </article>
+  `;
+}
+
+function renderSyncPanel() {
+  if (!elements.syncPanel) return;
+  const canSync = Boolean(firebaseSync);
+  const statusClass = firebaseStatus.state === "error" ? "error" : canSync ? "ok" : "idle";
+  const lastSync = syncInfo.lastSyncAtMs ? formatDate(new Date(syncInfo.lastSyncAtMs).toISOString()) : "Nunca";
+  const accountLabel = firebaseStatus.email
+    ? firebaseStatus.email
+    : firebaseStatus.uid
+      ? firebaseStatus.isAnonymous ? "Conta anônima deste aparelho" : firebaseStatus.uid
+      : "Sem conta conectada";
+
+  elements.syncPanel.innerHTML = `
+    <div class="sync-copy">
+      <p class="eyebrow">Firebase</p>
+      <h3>${escapeHTML(firebaseStatus.label)}</h3>
+      <p>${escapeHTML(firebaseStatus.detail || "")}</p>
+      <span class="sync-last">Conta: ${escapeHTML(accountLabel)}</span>
+      <span class="sync-last">UID: ${escapeHTML(firebaseStatus.uid || "-")}</span>
+      <span class="sync-last">Caminho: ${escapeHTML(firebaseStatus.path || "-")}</span>
+      <span class="sync-last">Última sync: ${escapeHTML(lastSync)}</span>
+    </div>
+    <div class="auth-box">
+      <button class="ghost small" type="button" data-action="login-google" ${canSync ? "" : "disabled"}>Google</button>
+      <label class="field">
+        <span>E-mail</span>
+        <input type="email" inputmode="email" autocomplete="email" data-auth-field="email" value="${escapeAttr(authForm.email)}" />
+      </label>
+      <label class="field">
+        <span>Senha</span>
+        <input type="password" autocomplete="current-password" data-auth-field="password" value="${escapeAttr(authForm.password)}" />
+      </label>
+      <div class="auth-actions">
+        <button class="ghost small" type="button" data-action="login-email" ${canSync ? "" : "disabled"}>Entrar</button>
+        <button class="ghost small" type="button" data-action="signup-email" ${canSync ? "" : "disabled"}>Criar</button>
+        <button class="danger small" type="button" data-action="logout-firebase" ${canSync ? "" : "disabled"}>Sair</button>
+      </div>
+    </div>
+    <div class="sync-actions">
+      <span class="sync-dot ${statusClass}"></span>
+      <button class="ghost small" type="button" data-action="sync-now" ${canSync ? "" : "disabled"}>Sincronizar</button>
+      <button class="ghost small" type="button" data-action="pull-cloud" ${canSync ? "" : "disabled"}>Baixar</button>
+      <button class="ghost small" type="button" data-action="push-cloud" ${canSync ? "" : "disabled"}>Enviar</button>
+    </div>
   `;
 }
 
@@ -538,7 +1087,7 @@ function renderTimer() {
         <span>${formatDuration(remaining)}</span>
       </div>
       <div class="timer-text">
-        <strong>${escapeHTML(exercise?.name || "Pausa")}</strong>
+        <strong>${escapeHTML(exercise ? getExerciseLabel(exercise) : "Pausa")}</strong>
         <span>${isPaused ? "Pausado" : "Descanso"}</span>
       </div>
       <div class="timer-actions">
@@ -601,21 +1150,23 @@ function toggleSkip(exerciseId) {
   render();
 }
 
-function changeWeight(exerciseId, delta) {
+function changeWeight(exerciseId, delta, kind = "main") {
   const exercise = findExercise(exerciseId);
   if (!exercise) return;
   const log = getLog(exercise);
-  const next = Math.max(0, parseNumber(log.weight, 0) + parseNumber(delta, 0));
-  log.weight = Math.round(next * 2) / 2;
+  const field = getWeightField(kind);
+  const next = Math.max(0, parseNumber(log[field], 0) + parseNumber(delta, 0));
+  log[field] = Math.round(next * 2) / 2;
   saveState();
   render();
 }
 
-function updateWeight(exerciseId, value) {
+function updateWeight(exerciseId, value, kind = "main") {
   const exercise = findExercise(exerciseId);
   if (!exercise) return;
   const log = getLog(exercise);
-  log.weight = Math.max(0, parseNumber(value, 0));
+  const field = getWeightField(kind);
+  log[field] = Math.max(0, parseNumber(value, 0));
   saveState();
 }
 
@@ -632,12 +1183,59 @@ function addExercise() {
   workout.push({
     id: uid(`treino-${state.activeWorkout.toLowerCase()}`),
     name: "Novo exercício",
+    type: "normal",
     sets: 3,
     reps: "10-12",
     rest: 75,
     startingWeight: 0,
-    note: ""
+    note: "",
+    dropSets: 2,
+    unilateralMode: "ambos",
+    combo: {
+      enabled: false,
+      name: "",
+      reps: "",
+      startingWeight: 0,
+      note: ""
+    },
+    combo2: {
+      enabled: false,
+      name: "",
+      reps: "",
+      startingWeight: 0,
+      note: ""
+    }
   });
+  saveState();
+  render();
+}
+
+function addWorkout() {
+  const workoutId = getNextWorkoutId();
+  state.workouts[workoutId] = [];
+  state.activeWorkout = workoutId;
+  state.activeView = "edit";
+  getDraft(workoutId);
+  saveState();
+  render();
+  scrollToTop();
+}
+
+function deleteWorkout() {
+  const ids = getWorkoutIds();
+  if (ids.length <= 1) {
+    window.alert("Mantenha pelo menos um treino.");
+    return;
+  }
+
+  const ok = window.confirm(`Excluir o Treino ${state.activeWorkout}?`);
+  if (!ok) return;
+
+  const previousWorkout = state.activeWorkout;
+  delete state.workouts[previousWorkout];
+  delete state.drafts[previousWorkout];
+  if (state.timer?.workoutId === previousWorkout) state.timer = null;
+  state.activeWorkout = getWorkoutIds()[0] || "A";
   saveState();
   render();
 }
@@ -666,19 +1264,83 @@ function moveExercise(exerciseId, direction) {
   render();
 }
 
-function updateExerciseField(exerciseId, field, value) {
+function toggleCombo(exerciseId) {
+  const exercise = findExercise(exerciseId);
+  if (!exercise) return;
+  const combo = ensureCombo(exercise);
+  combo.enabled = !combo.enabled;
+  exercise.type = combo.enabled ? "bi-set" : "normal";
+  if (combo.enabled && !combo.name) combo.name = "Exercício combinado";
+  const log = getLog(exercise);
+  if (combo.enabled && (log.comboWeight === undefined || log.comboWeight === null || log.comboWeight === "")) {
+    log.comboWeight = combo.startingWeight ?? 0;
+  }
+  saveState();
+  render();
+}
+
+function setExerciseType(exerciseId, type) {
+  const exercise = findExercise(exerciseId);
+  if (!exercise || !TYPE_OPTIONS.includes(type)) return;
+
+  const combo = ensureCombo(exercise);
+  const combo2 = ensureCombo2(exercise);
+  exercise.type = type;
+  combo.enabled = type === "bi-set" || type === "tri-set";
+  combo2.enabled = type === "tri-set";
+
+  if (combo.enabled && !combo.name) combo.name = "Exercício combinado";
+  if (combo2.enabled && !combo2.name) combo2.name = "Terceiro exercício";
+
+  const log = getLog(exercise);
+  if (combo.enabled && (log.comboWeight === undefined || log.comboWeight === null || log.comboWeight === "")) {
+    log.comboWeight = combo.startingWeight ?? 0;
+  }
+  if (combo2.enabled && (log.combo2Weight === undefined || log.combo2Weight === null || log.combo2Weight === "")) {
+    log.combo2Weight = combo2.startingWeight ?? 0;
+  }
+
+  saveState();
+  render();
+}
+
+function updateExerciseField(exerciseId, field, value, shouldRender = true) {
   const exercise = findExercise(exerciseId);
   if (!exercise) return;
 
-  if (field === "sets") exercise[field] = clamp(parseInteger(value, 1), 1, 12);
+  if (field.startsWith("combo.") || field.startsWith("combo2.")) {
+    const isSecondCombo = field.startsWith("combo2.");
+    const combo = isSecondCombo ? ensureCombo2(exercise) : ensureCombo(exercise);
+    const comboField = field.replace(isSecondCombo ? "combo2." : "combo.", "");
+    const weightField = isSecondCombo ? "combo2Weight" : "comboWeight";
+    if (comboField === "startingWeight") {
+      const previousWeight = Math.max(0, parseNumber(combo[comboField], 0));
+      combo[comboField] = Math.max(0, parseNumber(value, 0));
+      const log = getLog(exercise);
+      if (parseInteger(log.done, 0) === 0 || parseNumber(log[weightField], 0) === previousWeight) {
+        log[weightField] = combo[comboField];
+      }
+    } else {
+      combo[comboField] = value;
+    }
+  } else if (field === "sets") exercise[field] = clamp(parseInteger(value, 1), 1, 12);
   else if (field === "rest") exercise[field] = clamp(parseInteger(value, 0), 0, 600);
-  else if (field === "startingWeight") exercise[field] = Math.max(0, parseNumber(value, 0));
+  else if (field === "dropSets") exercise[field] = clamp(parseInteger(value, 1), 1, 6);
+  else if (field === "type") setExerciseType(exerciseId, value);
+  else if (field === "startingWeight") {
+    const previousWeight = Math.max(0, parseNumber(exercise[field], 0));
+    exercise[field] = Math.max(0, parseNumber(value, 0));
+    const log = getLog(exercise);
+    if (parseInteger(log.done, 0) === 0 || parseNumber(log.weight, 0) === previousWeight) {
+      log.weight = exercise[field];
+    }
+  }
   else exercise[field] = value;
 
   const log = getLog(exercise);
   log.done = clamp(parseInteger(log.done, 0), 0, parseInteger(exercise.sets, 1));
   saveState();
-  render();
+  if (shouldRender) render();
 }
 
 function startTimer(exercise) {
@@ -821,16 +1483,27 @@ function finishWorkout() {
     completion: totals.completion,
     entries: workout.map((exercise) => {
       const log = draft.logs[exercise.id] || {};
+      const combos = getCombos(exercise);
+      const savedCombos = combos.map((combo) => ({
+        name: combo.name || "Exercício combinado",
+        reps: combo.reps || "",
+        weight: parseNumber(log[combo.field], combo.startingWeight ?? 0),
+        note: combo.note || ""
+      }));
       return {
         exerciseId: exercise.id,
         name: exercise.name,
+        label: getExerciseLabel(exercise),
+        type: getExerciseType(exercise),
         plannedSets: parseInteger(exercise.sets, 0),
         reps: exercise.reps || "",
         rest: parseInteger(exercise.rest, 0),
         weight: parseNumber(log.weight, 0),
         doneSets: clamp(parseInteger(log.done, 0), 0, parseInteger(exercise.sets, 0)),
         skipped: Boolean(log.skipped),
-        notes: log.notes || ""
+        notes: log.notes || "",
+        combos: savedCombos,
+        combo: savedCombos[0] || null
       };
     })
   };
@@ -881,10 +1554,12 @@ function importData(file) {
     try {
       const next = JSON.parse(String(reader.result || ""));
       if (!next.workouts || !next.history) throw new Error("Arquivo invalido");
+      const workouts = normalizeWorkouts(next.workouts);
       state = {
         ...createDefaultState(),
         ...next,
-        activeWorkout: next.activeWorkout === "B" ? "B" : "A",
+        workouts,
+        activeWorkout: workouts[next.activeWorkout] ? next.activeWorkout : Object.keys(workouts)[0] || "A",
         activeView: "history"
       };
       saveState();
@@ -896,6 +1571,203 @@ function importData(file) {
     }
   };
   reader.readAsText(file);
+}
+
+function getFirebaseSetup() {
+  const setup = window.TREINO_FIREBASE_CONFIG;
+  if (!setup) return null;
+  const config = setup.config || setup.firebaseConfig || setup;
+  const enabled = setup.enabled === true || Boolean(config?.apiKey && config?.projectId && config?.appId);
+  if (!enabled) return null;
+  if (!config?.apiKey || !config?.projectId || !config?.appId) return null;
+  return {
+    config,
+    appName: setup.appName || "treino-ab",
+    documentPath: setup.documentPath || null
+  };
+}
+
+function setFirebaseStatus(next) {
+  firebaseStatus = {
+    ...firebaseStatus,
+    ...next
+  };
+  renderSyncPanel();
+}
+
+function getStateForSync() {
+  return JSON.parse(JSON.stringify(state));
+}
+
+function normalizeRemoteState(payload = {}) {
+  const workouts = normalizeWorkouts(payload.workouts);
+  return {
+    ...createDefaultState(),
+    ...payload,
+    workouts,
+    drafts: payload.drafts && typeof payload.drafts === "object" ? payload.drafts : {},
+    history: Array.isArray(payload.history) ? payload.history : [],
+    settings: {
+      vibration: payload.settings?.vibration !== false,
+      sound: payload.settings?.sound !== false
+    },
+    activeWorkout: workouts[payload.activeWorkout] ? payload.activeWorkout : Object.keys(workouts)[0] || "A",
+    activeView: state.activeView || "workout"
+  };
+}
+
+function applyRemoteState(remoteState, remoteUpdatedAtMs = Date.now()) {
+  isApplyingRemoteState = true;
+  state = normalizeRemoteState(remoteState);
+  syncInfo.localUpdatedAtMs = remoteUpdatedAtMs;
+  syncInfo.remoteUpdatedAtMs = remoteUpdatedAtMs;
+  syncInfo.lastSyncAtMs = Date.now();
+  saveSyncInfo();
+  saveState({ sync: false });
+  isApplyingRemoteState = false;
+  render();
+}
+
+function queueFirebaseSave() {
+  if (!firebaseSync) return;
+  firebaseSync.queueSave(getStateForSync(), syncInfo.localUpdatedAtMs);
+}
+
+async function initFirebaseSync() {
+  const setup = getFirebaseSetup();
+  if (!setup) {
+    renderSyncPanel();
+    return;
+  }
+
+  setFirebaseStatus({
+    state: "connecting",
+    label: "Conectando ao Firebase",
+    detail: "Preparando backup do treino no Firestore."
+  });
+
+  try {
+    const module = await import("./firebase-sync.js?v=3");
+    firebaseSync = await module.createFirebaseSync({
+      ...setup,
+      getLocalState: getStateForSync,
+      getLocalUpdatedAtMs: () => syncInfo.localUpdatedAtMs,
+      onRemoteState: applyRemoteState,
+      onSaved: (remoteUpdatedAtMs) => {
+        syncInfo.remoteUpdatedAtMs = remoteUpdatedAtMs;
+        syncInfo.lastSyncAtMs = Date.now();
+        saveSyncInfo();
+      },
+      onStatus: setFirebaseStatus
+    });
+    await firebaseSync.syncNow();
+  } catch (error) {
+    setFirebaseStatus({
+      state: "error",
+      label: "Firebase com erro",
+      detail: error?.message || "Não foi possível iniciar a sincronização."
+    });
+  }
+}
+
+async function syncNow() {
+  if (!firebaseSync) return;
+  try {
+    await firebaseSync.syncNow();
+  } catch (error) {
+    setFirebaseStatus({
+      state: "error",
+      label: "Erro ao sincronizar",
+      detail: error?.message || "Não consegui sincronizar agora."
+    });
+  }
+}
+
+async function pullCloud() {
+  if (!firebaseSync) return;
+  const ok = window.confirm("Baixar os dados da nuvem e substituir este aparelho?");
+  if (!ok) return;
+  try {
+    await firebaseSync.pullRemote({ force: true });
+  } catch (error) {
+    setFirebaseStatus({
+      state: "error",
+      label: "Erro ao baixar",
+      detail: error?.message || "Não consegui baixar os dados da nuvem."
+    });
+  }
+}
+
+async function pushCloud() {
+  if (!firebaseSync) return;
+  const ok = window.confirm("Enviar os dados deste aparelho para a nuvem?");
+  if (!ok) return;
+  syncInfo.localUpdatedAtMs = Date.now();
+  saveSyncInfo();
+  try {
+    await firebaseSync.pushLocal(getStateForSync(), syncInfo.localUpdatedAtMs);
+  } catch (error) {
+    setFirebaseStatus({
+      state: "error",
+      label: "Erro ao enviar",
+      detail: error?.message || "Não consegui enviar os dados para a nuvem."
+    });
+  }
+}
+
+function getAuthCredentials() {
+  return {
+    email: authForm.email.trim(),
+    password: authForm.password
+  };
+}
+
+async function loginGoogle() {
+  if (!firebaseSync?.signInWithGoogle) return;
+  try {
+    await firebaseSync.signInWithGoogle();
+  } catch {
+    renderSyncPanel();
+  }
+}
+
+async function loginEmail() {
+  if (!firebaseSync?.signInWithEmail) return;
+  const { email, password } = getAuthCredentials();
+  if (!email || !password) {
+    window.alert("Informe e-mail e senha.");
+    return;
+  }
+  try {
+    await firebaseSync.signInWithEmail(email, password);
+  } catch {
+    renderSyncPanel();
+  }
+}
+
+async function signupEmail() {
+  if (!firebaseSync?.createAccountWithEmail) return;
+  const { email, password } = getAuthCredentials();
+  if (!email || password.length < 6) {
+    window.alert("Informe um e-mail e uma senha com pelo menos 6 caracteres.");
+    return;
+  }
+  try {
+    await firebaseSync.createAccountWithEmail(email, password);
+  } catch {
+    renderSyncPanel();
+  }
+}
+
+async function logoutFirebase() {
+  if (!firebaseSync?.signOutUser) return;
+  const ok = window.confirm("Sair da conta atual neste aparelho?");
+  if (!ok) return;
+  try {
+    await firebaseSync.signOutUser();
+  } catch {
+    renderSyncPanel();
+  }
 }
 
 function handleClick(event) {
@@ -926,10 +1798,14 @@ function handleClick(event) {
   else if (action === "set-done") markSet(exerciseId, actionElement.dataset.value);
   else if (action === "undo-set") undoSet(exerciseId);
   else if (action === "toggle-skip") toggleSkip(exerciseId);
-  else if (action === "weight-step") changeWeight(exerciseId, actionElement.dataset.delta);
+  else if (action === "weight-step") changeWeight(exerciseId, actionElement.dataset.delta, actionElement.dataset.kind);
   else if (action === "add-exercise") addExercise();
+  else if (action === "add-workout") addWorkout();
+  else if (action === "delete-workout") deleteWorkout();
   else if (action === "delete-exercise") deleteExercise(exerciseId);
   else if (action === "move-exercise") moveExercise(exerciseId, actionElement.dataset.direction);
+  else if (action === "toggle-combo") toggleCombo(exerciseId);
+  else if (action === "set-exercise-type") setExerciseType(exerciseId, actionElement.dataset.type);
   else if (action === "timer-toggle") pauseOrResumeTimer();
   else if (action === "timer-add") addTimerSeconds(15);
   else if (action === "timer-stop") stopTimer();
@@ -937,16 +1813,27 @@ function handleClick(event) {
   else if (action === "clear-history") clearHistory();
   else if (action === "export-data") exportData();
   else if (action === "finish-workout") finishWorkout();
+  else if (action === "sync-now") syncNow();
+  else if (action === "pull-cloud") pullCloud();
+  else if (action === "push-cloud") pushCloud();
+  else if (action === "login-google") loginGoogle();
+  else if (action === "login-email") loginEmail();
+  else if (action === "signup-email") signupEmail();
+  else if (action === "logout-firebase") logoutFirebase();
 }
 
 function handleInput(event) {
   const target = event.target;
   if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return;
 
-  if (target.dataset.action === "weight-input") {
-    updateWeight(target.dataset.exercise, target.value);
+  if (target.dataset.authField) {
+    authForm[target.dataset.authField] = target.value;
+  } else if (target.dataset.action === "weight-input") {
+    updateWeight(target.dataset.exercise, target.value, target.dataset.kind);
   } else if (target.dataset.action === "note-input") {
     updateNote(target.dataset.exercise, target.value);
+  } else if (target.dataset.editField) {
+    updateExerciseField(target.dataset.exercise, target.dataset.editField, target.value, false);
   }
 }
 
@@ -996,3 +1883,4 @@ render();
 addFinishButton();
 ensureTicker();
 registerServiceWorker();
+initFirebaseSync();

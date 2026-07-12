@@ -4,10 +4,13 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#111413" />
-    <title>Treino A/B</title>
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Treino" />
+    <title>Treino</title>
     <link rel="manifest" href="./manifest.webmanifest" />
     <link rel="icon" href="./assets/icon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="./styles.css?v=3" />
+    <link rel="apple-touch-icon" href="./assets/icon.svg" />
+    <link rel="stylesheet" href="./styles.css?v=7" />
   </head>
   <body>
     <div class="app-shell">
@@ -25,10 +28,7 @@
       </header>
 
       <main>
-        <section class="switcher" aria-label="Selecionar treino">
-          <button class="switch-button is-active" type="button" data-workout="A">Treino A</button>
-          <button class="switch-button" type="button" data-workout="B">Treino B</button>
-        </section>
+        <section id="workoutSwitcher" class="switcher" aria-label="Selecionar treino"></section>
 
         <section id="workoutView" class="view is-active" aria-label="Treino de hoje">
           <div id="progressPanel" class="progress-panel"></div>
@@ -42,7 +42,11 @@
               <p class="eyebrow">Montagem</p>
               <h2 id="editTitle">Treino A</h2>
             </div>
-            <button class="primary small" type="button" data-action="add-exercise">+ Exercício</button>
+            <div class="edit-actions">
+              <button class="ghost small" type="button" data-action="delete-workout">Excluir treino</button>
+              <button class="ghost small" type="button" data-action="add-workout">+ Treino</button>
+              <button class="primary small" type="button" data-action="add-exercise">+ Exercício</button>
+            </div>
           </div>
           <div id="editList" class="edit-list"></div>
         </section>
@@ -62,6 +66,8 @@
             </label>
             <button class="danger small" type="button" data-action="clear-history">Limpar</button>
           </div>
+          <div id="syncPanel" class="sync-panel"></div>
+          <div id="exerciseHistory" class="exercise-history"></div>
           <div id="historyList" class="history-list"></div>
         </section>
       </main>
@@ -84,6 +90,7 @@
       </nav>
     </div>
 
-    <script src="./app.js?v=3" defer></script>
+    <script src="./firebase-config.js?v=2" defer></script>
+    <script src="./app.js?v=9" defer></script>
   </body>
 </html>

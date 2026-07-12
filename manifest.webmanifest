@@ -1,11 +1,17 @@
 {
-  "name": "Treino A/B",
+  "name": "Treino",
   "short_name": "Treino",
-  "description": "Controle mobile de treinos A e B com séries, pesos, descanso e histórico local.",
+  "description": "Controle mobile de treino com séries, pesos, descanso, histórico e backup.",
+  "id": "./index.html",
   "start_url": "./index.html",
+  "scope": "./",
   "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "portrait",
   "background_color": "#f5f7f6",
   "theme_color": "#111413",
+  "lang": "pt-BR",
+  "categories": ["health", "fitness", "productivity"],
   "icons": [
     {
       "src": "./assets/icon.svg",
