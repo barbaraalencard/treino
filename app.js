@@ -130,13 +130,17 @@ let authForm = {
 let isApplyingRemoteState = false;
 let ticker = null;
 let wakeLock = null;
+let vibrationInfo = {
+  state: "unknown",
+  detail: ""
+};
 
 function upgradeShellMarkup() {
   document.title = "Treino";
 
   const stylesheet = document.querySelector('link[rel="stylesheet"]');
-  if (stylesheet && !stylesheet.getAttribute("href")?.includes("v=9")) {
-    stylesheet.setAttribute("href", "./styles.css?v=9");
+  if (stylesheet && !stylesheet.getAttribute("href")?.includes("v=11")) {
+    stylesheet.setAttribute("href", "./styles.css?v=11");
   }
 
   if (!elements.workoutSwitcher) {
@@ -207,7 +211,8 @@ function createDefaultState() {
       sound: true
     },
     ui: {
-      collapsedEdit: {}
+      collapsedEdit: {},
+      expandedWorkoutCards: {}
     }
   };
 }
@@ -234,6 +239,9 @@ function loadState() {
       ui: {
         collapsedEdit: saved.ui?.collapsedEdit && typeof saved.ui.collapsedEdit === "object"
           ? saved.ui.collapsedEdit
+          : {},
+        expandedWorkoutCards: saved.ui?.expandedWorkoutCards && typeof saved.ui.expandedWorkoutCards === "object"
+          ? saved.ui.expandedWorkoutCards
           : {}
       }
     };
@@ -300,7 +308,31 @@ function getUiState() {
   if (!state.ui.collapsedEdit || typeof state.ui.collapsedEdit !== "object") {
     state.ui.collapsedEdit = {};
   }
+  if (!state.ui.expandedWorkoutCards || typeof state.ui.expandedWorkoutCards !== "object") {
+    state.ui.expandedWorkoutCards = {};
+  }
   return state.ui;
+}
+
+function getWorkoutCardKey(exerciseId, workoutId = state.activeWorkout) {
+  return `${workoutId}:${exerciseId}`;
+}
+
+function isWorkoutCardExpanded(exerciseId, workoutId = state.activeWorkout) {
+  return Boolean(getUiState().expandedWorkoutCards[getWorkoutCardKey(exerciseId, workoutId)]);
+}
+
+function toggleWorkoutCard(exerciseId) {
+  if (!exerciseId) return;
+  const ui = getUiState();
+  const key = getWorkoutCardKey(exerciseId);
+  if (ui.expandedWorkoutCards[key]) {
+    delete ui.expandedWorkoutCards[key];
+  } else {
+    ui.expandedWorkoutCards[key] = true;
+  }
+  saveState();
+  render();
 }
 
 function uid(prefix = "item") {
@@ -677,10 +709,14 @@ function renderWorkout() {
   const startedAt = new Date(draft.startedAt).getTime();
   const elapsed = Number.isFinite(startedAt) ? Math.round((Date.now() - startedAt) / 1000) : 0;
   const nextExercise = totals.pending[0];
+  const nextLog = nextExercise ? getLog(nextExercise, workoutId) : null;
+  const nextSets = nextExercise ? clamp(parseInteger(nextExercise.sets, 1), 1, 12) : 0;
+  const nextDone = nextLog ? clamp(parseInteger(nextLog.done, 0), 0, nextSets) : 0;
 
   elements.progressPanel.innerHTML = `
     <div class="progress-grid">
       <div class="progress-main">
+        <p class="eyebrow">Treino ${escapeHTML(workoutId)} em andamento</p>
         <div class="progress-title">
           <strong>${totals.doneSets}</strong>
           <span>/ ${totals.totalSets} séries</span>
@@ -688,10 +724,14 @@ function renderWorkout() {
         <div class="progress-bar" aria-hidden="true" style="--value: ${totals.completion}%">
           <span></span>
         </div>
-        <p>${totals.pending.length} exercício${totals.pending.length === 1 ? "" : "s"} pendente${totals.pending.length === 1 ? "" : "s"} · ${formatDuration(elapsed)}</p>
-        <div class="next-box">
-          <span>Próximo</span>
+        <div class="progress-facts">
+          <span>${totals.pending.length} pendente${totals.pending.length === 1 ? "" : "s"}</span>
+          <span>${formatDuration(elapsed)}</span>
+        </div>
+        <div class="next-box ${nextExercise ? "" : "is-complete"}">
+          <span>${nextExercise ? "Agora" : "Hoje"}</span>
           <strong>${nextExercise ? escapeHTML(getExerciseLabel(nextExercise)) : "Treino completo"}</strong>
+          <small>${nextExercise ? `${nextDone}/${nextSets} séries · ${formatRest(nextExercise.rest)} pausa` : "Pronto para salvar."}</small>
         </div>
       </div>
       <div class="round-meter" style="--angle: ${progressAngle}">
@@ -712,30 +752,39 @@ function renderWorkout() {
   }
 
   const pendingIds = new Set(totals.pending.map((exercise) => exercise.id));
-  const pendingExercises = workout.filter((exercise) => pendingIds.has(exercise.id));
+  const currentExercise = nextExercise ? [nextExercise] : [];
+  const pendingExercises = workout.filter((exercise) => pendingIds.has(exercise.id) && exercise.id !== nextExercise?.id);
   const completedExercises = workout.filter((exercise) => !pendingIds.has(exercise.id));
   elements.exerciseList.innerHTML = [
-    renderExerciseSection("Pendentes", pendingExercises),
-    renderExerciseSection("Concluídos", completedExercises)
+    renderExerciseSection("Agora", currentExercise, { variant: "current", currentId: nextExercise?.id }),
+    renderExerciseSection("Próximos", pendingExercises, { variant: "pending", collapsible: true }),
+    renderExerciseSection("Concluídos", completedExercises, { variant: "completed", collapsible: true })
   ].join("");
 }
 
-function renderExerciseSection(title, exercises) {
+function renderExerciseSection(title, exercises, options = {}) {
   if (!exercises.length) return "";
+  const className = ["exercise-section", options.variant ? `is-${options.variant}` : ""].filter(Boolean).join(" ");
   return `
-    <section class="exercise-section">
+    <section class="${className}">
       <div class="list-label">${escapeHTML(title)}</div>
-      ${exercises.map((exercise) => renderExerciseCard(exercise)).join("")}
+      ${exercises.map((exercise) => renderExerciseCard(exercise, {
+        isCurrent: exercise.id === options.currentId,
+        isCollapsible: Boolean(options.collapsible)
+      })).join("")}
     </section>
   `;
 }
 
-function renderExerciseCard(exercise) {
+function renderExerciseCard(exercise, options = {}) {
   const log = getLog(exercise);
   const sets = clamp(parseInteger(exercise.sets, 1), 1, 12);
   const done = clamp(parseInteger(log.done, 0), 0, sets);
   const isComplete = done >= sets;
   const isSkipped = Boolean(log.skipped);
+  const isCollapsible = Boolean(options.isCollapsible);
+  const isExpanded = options.isCurrent || !isCollapsible || isWorkoutCardExpanded(exercise.id);
+  const isCompact = isCollapsible && !isExpanded;
   const lastEntry = getLastEntry(state.activeWorkout, exercise);
   const type = getExerciseType(exercise);
   const combos = getCombos(exercise);
@@ -746,6 +795,8 @@ function renderExerciseCard(exercise) {
   const statusClass = isSkipped ? "skip" : isComplete ? "done" : "";
   const className = [
     "exercise-card",
+    options.isCurrent ? "is-current" : "",
+    isCompact ? "is-compact" : "",
     isComplete ? "is-complete" : "",
     isSkipped ? "is-skipped" : ""
   ]
@@ -791,18 +842,54 @@ function renderExerciseCard(exercise) {
       ? `<span>${escapeHTML(exercise.unilateralMode || "ambos")}</span>`
       : "";
 
+  if (isCompact) {
+    return `
+      <article class="${className}" data-exercise-card="${escapeAttr(exercise.id)}">
+        <div class="compact-toggle" data-action="toggle-workout-card" data-exercise="${escapeAttr(exercise.id)}" aria-label="Mostrar detalhes de ${escapeAttr(exercise.name)}">
+          <div class="exercise-header">
+            <div>
+              <p class="eyebrow">${escapeHTML(getTypeLabel(type))}</p>
+              <h3>${escapeHTML(getExerciseLabel(exercise))}</h3>
+            </div>
+            <div class="status-stack">
+              ${isRecord ? `<span class="record-pill">Recorde</span>` : ""}
+              <span class="status-pill ${statusClass}">${statusText}</span>
+            </div>
+          </div>
+          <div class="compact-summary">
+            <span>${done}/${sets} séries</span>
+            <span>${formatWeight(currentWeight)}</span>
+            <span>${formatRest(exercise.rest)}</span>
+            <span class="compact-more">Detalhes</span>
+          </div>
+        </div>
+        <div class="compact-actions">
+          <button class="ghost small" type="button" data-action="toggle-workout-card" data-exercise="${escapeAttr(exercise.id)}">Abrir</button>
+          <button class="${isSkipped ? "ghost" : "danger"} small" type="button" data-action="toggle-skip" data-exercise="${escapeAttr(exercise.id)}">
+            ${isSkipped ? "Retomar" : "Pular"}
+          </button>
+        </div>
+      </article>
+    `;
+  }
+
+  const headerAttributes = isCollapsible
+    ? ` data-action="toggle-workout-card" data-exercise="${escapeAttr(exercise.id)}" aria-label="Ocultar detalhes de ${escapeAttr(exercise.name)}"`
+    : "";
+
   return `
     <article class="${className}" data-exercise-card="${escapeAttr(exercise.id)}">
-      <div class="exercise-header">
-        <div>
-          <p class="eyebrow">${escapeHTML(getTypeLabel(type))}</p>
-          <h3>${escapeHTML(getExerciseLabel(exercise))}</h3>
+      <div class="exercise-header" ${headerAttributes}>
+          <div>
+            <p class="eyebrow">${escapeHTML(getTypeLabel(type))}</p>
+            <h3>${escapeHTML(getExerciseLabel(exercise))}</h3>
+          </div>
+          <div class="status-stack">
+            ${isRecord ? `<span class="record-pill">Recorde</span>` : ""}
+            <span class="status-pill ${statusClass}">${statusText}</span>
+            ${isCollapsible ? `<span class="collapse-hint">Ocultar</span>` : ""}
+          </div>
         </div>
-        <div class="status-stack">
-          ${isRecord ? `<span class="record-pill">Recorde</span>` : ""}
-          <span class="status-pill ${statusClass}">${statusText}</span>
-        </div>
-      </div>
 
       <div class="exercise-meta">
         <div class="meta-item">
@@ -1049,13 +1136,14 @@ function renderExerciseHistory() {
               <div class="load-trend empty">Sem cargas registradas</div>
             </div>
             <div class="history-side">
-              <span>Sem registro</span>
+              <span class="suggestion-pill">Sem registro</span>
             </div>
           </article>
         `;
       }
 
       const suggestion = getLoadSuggestion(exercise, last);
+      const trend = getLoadTrend(entries);
       const comboLine = (Array.isArray(last.combos) ? last.combos : last.combo ? [last.combo] : [])
         .map((combo) => `${combo.name}: ${formatWeight(combo.weight)}`)
         .join(" · ");
@@ -1070,7 +1158,8 @@ function renderExerciseHistory() {
           </div>
           <div class="history-side">
             ${bestWeight ? `<strong>Melhor ${formatWeight(bestWeight)}</strong>` : ""}
-            <span>${escapeHTML(suggestion)}</span>
+            <span class="trend-pill is-${trend.state}">${escapeHTML(trend.label)}</span>
+            <span class="suggestion-pill">${escapeHTML(suggestion)}</span>
           </div>
         </article>
       `;
@@ -1084,6 +1173,18 @@ function renderExerciseHistory() {
     </div>
     ${cards}
   `;
+}
+
+function getLoadTrend(entries) {
+  const weights = entries
+    .filter((entry) => !entry.skipped)
+    .map((entry) => parseNumber(entry.weight, 0))
+    .filter((weight) => weight > 0);
+  if (weights.length < 2) return { state: "neutral", label: "Base" };
+  const [latest, previous] = weights;
+  if (latest > previous) return { state: "up", label: "Subiu" };
+  if (latest < previous) return { state: "down", label: "Reduziu" };
+  return { state: "stable", label: "Estável" };
 }
 
 function renderLoadTrend(entries, bestWeight) {
@@ -1196,19 +1297,23 @@ function renderTimer() {
   const remaining = getTimerRemaining(timer);
   const total = Math.max(1, timer.durationSeconds || remaining || 1);
   const completion = clamp(((total - remaining) / total) * 360, 0, 360);
+  const completionPercent = clamp(((total - remaining) / total) * 100, 0, 100);
   const exercise = (state.workouts[timer.workoutId] || []).find((item) => item.id === timer.exerciseId);
   const timerLabel = timer.label || (exercise ? getExerciseLabel(exercise) : "Pausa");
   const isPaused = timer.status === "paused";
+  const vibrationNotice = getVibrationNotice();
 
   elements.timerBar.classList.add("is-active");
   elements.timerBar.innerHTML = `
+    <div class="timer-progress-line" style="--value: ${completionPercent}%"><span></span></div>
     <div class="timer-content">
       <div class="timer-face" style="--angle: ${completion}deg">
         <span>${formatDuration(remaining)}</span>
       </div>
       <div class="timer-text">
+        <span>${isPaused ? "Pausado" : "Descanso ativo"}</span>
         <strong>${escapeHTML(timerLabel)}</strong>
-        <span>${isPaused ? "Pausado" : "Descanso"}</span>
+        ${vibrationNotice ? `<small>${escapeHTML(vibrationNotice)}</small>` : ""}
       </div>
       <div class="timer-actions">
         <button type="button" data-action="timer-add" aria-label="Adicionar 15 segundos">+15</button>
@@ -1489,6 +1594,7 @@ function startTimer(exercise) {
     remainingSeconds: durationSeconds,
     lastCountdownVibration: null
   };
+  vibrateDevice(70, "inicio");
   requestWakeLock();
   ensureTicker();
 }
@@ -1504,10 +1610,51 @@ function startTestTimer() {
     remainingSeconds: 10,
     lastCountdownVibration: null
   };
+  vibrateDevice([80, 40, 80], "teste");
   requestWakeLock();
   ensureTicker();
   saveState();
   render();
+}
+
+function vibrateDevice(pattern, reason = "") {
+  if (!state.settings.vibration) {
+    vibrationInfo = {
+      state: "off",
+      detail: "Vibração desligada"
+    };
+    return false;
+  }
+
+  if (!navigator.vibrate) {
+    vibrationInfo = {
+      state: "unsupported",
+      detail: "Vibração indisponível neste navegador"
+    };
+    return false;
+  }
+
+  try {
+    const didVibrate = navigator.vibrate(pattern);
+    vibrationInfo = didVibrate
+      ? { state: "ok", detail: reason ? "Vibração ativa" : "" }
+      : { state: "blocked", detail: "Vibração bloqueada pelo navegador" };
+    return didVibrate;
+  } catch {
+    vibrationInfo = {
+      state: "blocked",
+      detail: "Vibração bloqueada pelo navegador"
+    };
+    return false;
+  }
+}
+
+function getVibrationNotice() {
+  if (!state.settings.vibration) return "Vibração desligada";
+  if (!navigator.vibrate) return "Vibração indisponível neste navegador";
+  if (vibrationInfo.state === "blocked") return vibrationInfo.detail;
+  if (vibrationInfo.state === "unsupported") return vibrationInfo.detail;
+  return "";
 }
 
 async function requestWakeLock() {
@@ -1606,20 +1753,17 @@ function ensureTicker() {
 
 function notifyRestCountdown(timer) {
   if (!timer || timer.status !== "running") return;
-  if (!state.settings.vibration || !navigator.vibrate) return;
 
   const remaining = getTimerRemaining(timer);
   if (remaining < 1 || remaining > 5) return;
   if (timer.lastCountdownVibration === remaining) return;
 
   timer.lastCountdownVibration = remaining;
-  navigator.vibrate(remaining === 1 ? 160 : 90);
+  vibrateDevice(remaining === 1 ? [180, 60, 220] : [110, 45, 110], "contagem");
 }
 
 function notifyRestEnd(exerciseId) {
-  if (state.settings.vibration && navigator.vibrate) {
-    navigator.vibrate([180, 80, 180]);
-  }
+  vibrateDevice([220, 80, 220, 80, 320], "fim");
 
   if (!state.settings.sound) return;
   try {
@@ -2001,6 +2145,7 @@ function handleClick(event) {
   else if (action === "delete-exercise") deleteExercise(exerciseId);
   else if (action === "move-exercise") moveExercise(exerciseId, actionElement.dataset.direction);
   else if (action === "toggle-edit-collapse") toggleEditCollapse(exerciseId);
+  else if (action === "toggle-workout-card") toggleWorkoutCard(exerciseId);
   else if (action === "toggle-combo") toggleCombo(exerciseId);
   else if (action === "set-exercise-type") setExerciseType(exerciseId, actionElement.dataset.type);
   else if (action === "timer-toggle") pauseOrResumeTimer();
@@ -2069,13 +2214,10 @@ function scrollToBottom() {
 
 function addFinishButton() {
   const button = document.createElement("button");
-  button.className = "primary";
+  button.className = "primary finish-button";
   button.type = "button";
   button.dataset.action = "finish-workout";
   button.textContent = "Finalizar treino";
-  button.style.width = "100%";
-  button.style.marginTop = "12px";
-  button.style.minHeight = "52px";
   elements.exerciseList.after(button);
 }
 
