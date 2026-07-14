@@ -129,13 +129,14 @@ let authForm = {
 };
 let isApplyingRemoteState = false;
 let ticker = null;
+let wakeLock = null;
 
 function upgradeShellMarkup() {
   document.title = "Treino";
 
   const stylesheet = document.querySelector('link[rel="stylesheet"]');
-  if (stylesheet && !stylesheet.getAttribute("href")?.includes("v=8")) {
-    stylesheet.setAttribute("href", "./styles.css?v=8");
+  if (stylesheet && !stylesheet.getAttribute("href")?.includes("v=9")) {
+    stylesheet.setAttribute("href", "./styles.css?v=9");
   }
 
   if (!elements.workoutSwitcher) {
@@ -165,6 +166,17 @@ function upgradeShellMarkup() {
     history.className = "exercise-history";
     elements.historyList.before(history);
     elements.exerciseHistory = history;
+  }
+
+  const importRow = document.querySelector(".import-row");
+  if (importRow && !document.querySelector('[data-action="test-timer"]')) {
+    const testButton = document.createElement("button");
+    testButton.className = "ghost small";
+    testButton.type = "button";
+    testButton.dataset.action = "test-timer";
+    testButton.textContent = "Testar timer";
+    const clearButton = importRow.querySelector('[data-action="clear-history"]');
+    importRow.insertBefore(testButton, clearButton || null);
   }
 
   if (!elements.pageJumpButtons) {
@@ -583,6 +595,36 @@ function getLastEntry(workoutId, exercise) {
   return null;
 }
 
+function findHistoryEntry(session, exercise) {
+  const byId = session.entries?.find((entry) => entry.exerciseId === exercise.id);
+  if (byId) return byId;
+  return session.entries?.find(
+    (entry) => entry.name?.toLowerCase() === exercise.name.toLowerCase()
+  ) || null;
+}
+
+function getExerciseEntries(workoutId, exercise) {
+  return state.history
+    .filter((session) => session.workoutId === workoutId)
+    .map((session) => {
+      const entry = findHistoryEntry(session, exercise);
+      return entry ? { ...entry, sessionFinishedAt: session.finishedAt } : null;
+    })
+    .filter(Boolean);
+}
+
+function getBestWeight(workoutId, exercise) {
+  return getExerciseEntries(workoutId, exercise).reduce((best, entry) => {
+    if (entry.skipped) return best;
+    return Math.max(best, parseNumber(entry.weight, 0));
+  }, 0);
+}
+
+function isPersonalRecord(workoutId, exercise, weight) {
+  const best = getBestWeight(workoutId, exercise);
+  return best > 0 && parseNumber(weight, 0) > best;
+}
+
 function getLoadSuggestion(exercise, lastEntry = null) {
   if (!lastEntry) return formatWeight(exercise.startingWeight);
   if (lastEntry.skipped || parseInteger(lastEntry.doneSets, 0) < parseInteger(lastEntry.plannedSets, 0)) {
@@ -698,6 +740,8 @@ function renderExerciseCard(exercise) {
   const type = getExerciseType(exercise);
   const combos = getCombos(exercise);
   const suggestion = getLoadSuggestion(exercise, lastEntry);
+  const currentWeight = parseNumber(log.weight, exercise.startingWeight ?? 0);
+  const isRecord = isPersonalRecord(state.activeWorkout, exercise, currentWeight);
   const statusText = isSkipped ? "Pulado" : isComplete ? "Completo" : `${done}/${sets}`;
   const statusClass = isSkipped ? "skip" : isComplete ? "done" : "";
   const className = [
@@ -754,7 +798,10 @@ function renderExerciseCard(exercise) {
           <p class="eyebrow">${escapeHTML(getTypeLabel(type))}</p>
           <h3>${escapeHTML(getExerciseLabel(exercise))}</h3>
         </div>
-        <span class="status-pill ${statusClass}">${statusText}</span>
+        <div class="status-stack">
+          ${isRecord ? `<span class="record-pill">Recorde</span>` : ""}
+          <span class="status-pill ${statusClass}">${statusText}</span>
+        </div>
       </div>
 
       <div class="exercise-meta">
@@ -990,15 +1037,20 @@ function renderExerciseHistory() {
 
   const cards = workout
     .map((exercise) => {
-      const last = getLastEntry(state.activeWorkout, exercise);
+      const entries = getExerciseEntries(state.activeWorkout, exercise);
+      const last = entries[0] || null;
+      const bestWeight = getBestWeight(state.activeWorkout, exercise);
       if (!last) {
         return `
           <article class="exercise-history-card">
-            <div>
+            <div class="exercise-history-main">
               <p class="eyebrow">${escapeHTML(getTypeLabel(getExerciseType(exercise)))}</p>
               <h3>${escapeHTML(getExerciseLabel(exercise))}</h3>
+              <div class="load-trend empty">Sem cargas registradas</div>
             </div>
-            <span>Sem registro</span>
+            <div class="history-side">
+              <span>Sem registro</span>
+            </div>
           </article>
         `;
       }
@@ -1010,12 +1062,16 @@ function renderExerciseHistory() {
 
       return `
         <article class="exercise-history-card">
-          <div>
+          <div class="exercise-history-main">
             <p class="eyebrow">${escapeHTML(getTypeLabel(last.type || getExerciseType(exercise)))}</p>
             <h3>${escapeHTML(getExerciseLabel(exercise))}</h3>
             <small>${formatWeight(last.weight)} · ${last.doneSets}/${last.plannedSets} séries${comboLine ? ` · ${escapeHTML(comboLine)}` : ""}</small>
+            ${renderLoadTrend(entries, bestWeight)}
           </div>
-          <span>${escapeHTML(suggestion)}</span>
+          <div class="history-side">
+            ${bestWeight ? `<strong>Melhor ${formatWeight(bestWeight)}</strong>` : ""}
+            <span>${escapeHTML(suggestion)}</span>
+          </div>
         </article>
       `;
     })
@@ -1027,6 +1083,21 @@ function renderExerciseHistory() {
       <h3>Treino ${escapeHTML(state.activeWorkout)}</h3>
     </div>
     ${cards}
+  `;
+}
+
+function renderLoadTrend(entries, bestWeight) {
+  const recent = entries.slice(0, 5).reverse();
+  if (!recent.length) return `<div class="load-trend empty">Sem cargas registradas</div>`;
+
+  return `
+    <div class="load-trend" aria-label="Últimas 5 cargas">
+      ${recent.map((entry) => {
+        const weight = parseNumber(entry.weight, 0);
+        const isBest = bestWeight > 0 && weight === bestWeight;
+        return `<span class="load-pill ${isBest ? "is-best" : ""}">${formatWeight(weight)}</span>`;
+      }).join("")}
+    </div>
   `;
 }
 
@@ -1118,6 +1189,7 @@ function renderTimer() {
   if (!timer || timer.workoutId !== state.activeWorkout) {
     elements.timerBar.classList.remove("is-active");
     elements.timerBar.innerHTML = "";
+    if (!timer) releaseWakeLock();
     return;
   }
 
@@ -1125,6 +1197,7 @@ function renderTimer() {
   const total = Math.max(1, timer.durationSeconds || remaining || 1);
   const completion = clamp(((total - remaining) / total) * 360, 0, 360);
   const exercise = (state.workouts[timer.workoutId] || []).find((item) => item.id === timer.exerciseId);
+  const timerLabel = timer.label || (exercise ? getExerciseLabel(exercise) : "Pausa");
   const isPaused = timer.status === "paused";
 
   elements.timerBar.classList.add("is-active");
@@ -1134,7 +1207,7 @@ function renderTimer() {
         <span>${formatDuration(remaining)}</span>
       </div>
       <div class="timer-text">
-        <strong>${escapeHTML(exercise ? getExerciseLabel(exercise) : "Pausa")}</strong>
+        <strong>${escapeHTML(timerLabel)}</strong>
         <span>${isPaused ? "Pausado" : "Descanso"}</span>
       </div>
       <div class="timer-actions">
@@ -1413,9 +1486,56 @@ function startTimer(exercise) {
     status: "running",
     durationSeconds,
     endsAt: Date.now() + durationSeconds * 1000,
-    remainingSeconds: durationSeconds
+    remainingSeconds: durationSeconds,
+    lastCountdownVibration: null
   };
+  requestWakeLock();
   ensureTicker();
+}
+
+function startTestTimer() {
+  state.timer = {
+    workoutId: state.activeWorkout,
+    exerciseId: "__timer-test__",
+    label: "Teste de descanso",
+    status: "running",
+    durationSeconds: 10,
+    endsAt: Date.now() + 10000,
+    remainingSeconds: 10,
+    lastCountdownVibration: null
+  };
+  requestWakeLock();
+  ensureTicker();
+  saveState();
+  render();
+}
+
+async function requestWakeLock() {
+  if (wakeLock || !navigator.wakeLock || document.visibilityState !== "visible") return;
+
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+    wakeLock.addEventListener("release", () => {
+      wakeLock = null;
+    });
+  } catch {
+    wakeLock = null;
+  }
+}
+
+function releaseWakeLock() {
+  if (!wakeLock) return;
+  const lock = wakeLock;
+  wakeLock = null;
+  lock.release().catch(() => {});
+}
+
+function syncWakeLockWithTimer() {
+  if (state.timer?.status === "running") {
+    requestWakeLock();
+  } else {
+    releaseWakeLock();
+  }
 }
 
 function getTimerRemaining(timer = state.timer) {
@@ -1426,6 +1546,7 @@ function getTimerRemaining(timer = state.timer) {
 
 function stopTimer(shouldRender = true) {
   state.timer = null;
+  releaseWakeLock();
   saveState();
   if (shouldRender) render();
 }
@@ -1435,9 +1556,11 @@ function pauseOrResumeTimer() {
   if (state.timer.status === "paused") {
     state.timer.status = "running";
     state.timer.endsAt = Date.now() + Math.max(0, state.timer.remainingSeconds) * 1000;
+    requestWakeLock();
   } else {
     state.timer.status = "paused";
     state.timer.remainingSeconds = getTimerRemaining(state.timer);
+    releaseWakeLock();
   }
   saveState();
   render();
@@ -1462,8 +1585,12 @@ function ensureTicker() {
     if (!state.timer) {
       window.clearInterval(ticker);
       ticker = null;
+      releaseWakeLock();
       return;
     }
+
+    syncWakeLockWithTimer();
+    notifyRestCountdown(state.timer);
 
     if (state.timer.status === "running" && getTimerRemaining(state.timer) <= 0) {
       const exerciseId = state.timer.exerciseId;
@@ -1475,6 +1602,18 @@ function ensureTicker() {
 
     renderTimer();
   }, 500);
+}
+
+function notifyRestCountdown(timer) {
+  if (!timer || timer.status !== "running") return;
+  if (!state.settings.vibration || !navigator.vibrate) return;
+
+  const remaining = getTimerRemaining(timer);
+  if (remaining < 1 || remaining > 5) return;
+  if (timer.lastCountdownVibration === remaining) return;
+
+  timer.lastCountdownVibration = remaining;
+  navigator.vibrate(remaining === 1 ? 160 : 90);
 }
 
 function notifyRestEnd(exerciseId) {
@@ -1867,6 +2006,7 @@ function handleClick(event) {
   else if (action === "timer-toggle") pauseOrResumeTimer();
   else if (action === "timer-add") addTimerSeconds(15);
   else if (action === "timer-stop") stopTimer();
+  else if (action === "test-timer") startTestTimer();
   else if (action === "reset-today") resetCurrentDraft();
   else if (action === "clear-history") clearHistory();
   else if (action === "export-data") exportData();
@@ -1949,9 +2089,17 @@ function registerServiceWorker() {
 document.addEventListener("click", handleClick);
 document.addEventListener("input", handleInput);
 document.addEventListener("change", handleChange);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    syncWakeLockWithTimer();
+  } else {
+    releaseWakeLock();
+  }
+});
 
 render();
 addFinishButton();
 ensureTicker();
+syncWakeLockWithTimer();
 registerServiceWorker();
 initFirebaseSync();

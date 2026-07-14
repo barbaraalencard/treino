@@ -396,6 +396,24 @@ h4 {
   white-space: nowrap;
 }
 
+.status-stack {
+  display: grid;
+  gap: 6px;
+  justify-items: end;
+}
+
+.record-pill {
+  min-height: 26px;
+  padding: 6px 9px;
+  border-radius: 999px;
+  background: var(--gold-soft);
+  color: var(--gold);
+  font-size: 0.7rem;
+  font-weight: 900;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
 .status-pill.done {
   background: var(--accent-soft);
   color: var(--accent-strong);
@@ -856,17 +874,18 @@ h4 {
 }
 
 .exercise-history-card {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   align-items: flex-start;
-  justify-content: space-between;
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface);
+  box-shadow: 0 10px 24px rgba(20, 28, 24, 0.05);
 }
 
-.exercise-history-card div {
+.exercise-history-main {
   min-width: 0;
 }
 
@@ -883,8 +902,19 @@ h4 {
   line-height: 1.35;
 }
 
-.exercise-history-card > span {
-  flex: 0 0 auto;
+.history-side {
+  display: grid;
+  gap: 6px;
+  justify-items: end;
+}
+
+.history-side strong {
+  color: var(--gold);
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+.history-side span {
   max-width: 120px;
   padding: 7px 8px;
   border-radius: var(--radius);
@@ -893,6 +923,35 @@ h4 {
   text-align: center;
   font-size: 0.78rem;
   font-weight: 900;
+}
+
+.load-trend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.load-trend.empty {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.load-pill {
+  padding: 6px 8px;
+  border: 1px solid #edf1ef;
+  border-radius: 999px;
+  background: #f7faf8;
+  color: var(--text);
+  font-size: 0.75rem;
+  font-weight: 900;
+}
+
+.load-pill.is-best {
+  border-color: rgba(177, 132, 18, 0.26);
+  background: var(--gold-soft);
+  color: var(--gold);
 }
 
 .history-card {
@@ -1111,6 +1170,20 @@ h4 {
 
 .nav-button.is-active span {
   background: var(--accent-soft);
+}
+
+@media (max-width: 420px) {
+  .exercise-history-card {
+    grid-template-columns: 1fr;
+  }
+
+  .history-side {
+    justify-items: start;
+  }
+
+  .history-side span {
+    max-width: 100%;
+  }
 }
 
 @media (min-width: 560px) {
